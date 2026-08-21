@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: wasm32-unknown-unknown
+          components: clippy,rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.57.0,wasm-tools@1.252.0
+      - run: just check
+      - run: just reproducible

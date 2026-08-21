@@ -1,0 +1,74 @@
+package sigil:sql@0.1.0;
+
+/// Experimental common SQL driver surface. It grants no host authority.
+interface driver {
+    record connect-options {
+        endpoint: string,
+        username-secret: string,
+        password-secret: string,
+        database: option<string>,
+    }
+
+    enum error-class {
+        authentication,
+        server,
+        transport,
+        protocol,
+        encoding,
+        limit,
+        timeout,
+        closed,
+        unsupported,
+    }
+
+    record error {
+        class: error-class,
+        vendor-code: option<u32>,
+        sqlstate: option<string>,
+        message: string,
+    }
+
+    variant cell {
+        null,
+        text(string),
+        bytes(list<u8>),
+    }
+
+    record column {
+        catalog: string,
+        schema: string,
+        table: string,
+        original-table: string,
+        name: string,
+        original-name: string,
+        vendor-type: u32,
+        charset: u32,
+        collation: u32,
+        %flags: u32,
+    }
+
+    record row {
+        cells: list<cell>,
+    }
+
+    record row-set {
+        columns: list<column>,
+        rows: list<row>,
+    }
+
+    record command-result {
+        affected-rows: u64,
+    }
+
+    variant query-result {
+        rows(row-set),
+        command(command-result),
+    }
+
+    resource connection {
+        query: func(sql: string) -> result<query-result, error>;
+        close: func();
+    }
+
+    connect: func(options: connect-options) -> result<connection, error>;
+}

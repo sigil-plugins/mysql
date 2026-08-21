@@ -1,0 +1,7 @@
+package sigil:mysql@0.1.0;
+
+world mysql {
+    import sigil:host/net@1.0.0;
+    import sigil:host/secrets@1.0.0;
+    export sigil:sql/driver@0.1.0;
+}

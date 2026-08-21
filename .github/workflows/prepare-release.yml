@@ -1,0 +1,33 @@
+name: prepare-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.57.0,wasm-tools@1.252.0
+      - name: Build checksum-verified zstd 1.5.7
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSLO https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+          echo 'eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3  zstd-1.5.7.tar.gz' | sha256sum --check --strict
+          tar -xzf zstd-1.5.7.tar.gz
+          make -C zstd-1.5.7 -j2 zstd
+          echo "$PWD/zstd-1.5.7/programs" >> "$GITHUB_PATH"
+      - run: just dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mysql-candidate-assets
+          path: dist/
+          if-no-files-found: error

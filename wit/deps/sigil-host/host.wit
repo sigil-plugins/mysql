@@ -1,0 +1,72 @@
+package sigil:host@1.0.0;
+
+/// Attributed host logging. The host owns redaction and audience filtering.
+interface log {
+    debug: func(message: string);
+    info: func(message: string);
+    warn: func(message: string);
+}
+
+interface types {
+    variant byte-error {
+        denied,
+        limit,
+        internal,
+    }
+
+    variant secret-error {
+        denied,
+        limit,
+        internal,
+    }
+}
+
+/// Replayable bytes derived from the evaluation tuple.
+interface random {
+    use types.{byte-error};
+    bytes: func(count: u32) -> result<list<u8>, byte-error>;
+}
+
+/// Nondeterministic OS bytes. This is a separate, explicit grant.
+interface entropy {
+    use types.{byte-error};
+    bytes: func(count: u32) -> result<list<u8>, byte-error>;
+}
+
+/// Allowlisted access to the same secret source used by sigil.env().
+interface secrets {
+    use types.{secret-error};
+    get: func(name: string) -> result<list<u8>, secret-error>;
+}
+
+/// Named outbound TCP streams. Concrete routing and TLS remain host-owned.
+interface net {
+    variant error {
+        denied(string),
+        unavailable(string),
+        timeout(string),
+        tls(string),
+        io(string),
+        limit(string),
+    }
+
+    resource %stream {
+        read: func(max-bytes: u32) -> result<list<u8>, error>;
+        read-exact: func(bytes: u32) -> result<list<u8>, error>;
+        write-all: func(data: list<u8>) -> result<_, error>;
+        flush: func() -> result<_, error>;
+        upgrade-tls: func() -> result<_, error>;
+        close: func();
+    }
+
+    connect: func(endpoint: string) -> result<%stream, error>;
+}
+
+/// Bindgen-only world used by Sigil to implement every v1 host interface.
+world imports {
+    import log;
+    import random;
+    import entropy;
+    import secrets;
+    import net;
+}

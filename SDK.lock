@@ -1,0 +1,6 @@
+repository = "github:sigil-plugins/sigil-plugin-sdk"
+commit = "c9cc068d242bc19bde5bac91b942f5d8b3696bd0"
+host_wit_sha256 = "a1fc237f947082ee3da74e5f65dd3a4f1301185693cf6e4dbe5b52bee11c8bc7"
+host_wit_blake3 = "bea246ac1680a462633467793437d85c136a318e37eaca138969d478c7299b9f"
+sql_wit_sha256 = "1eed081d79af7aca61c343667b1a1d763b8be70f912d0c67f4b48d3ef0fee8f2"
+sql_wit_blake3 = "62cb190b6bcf7bf9fb45a974cb4865ec462c96520b4b88eef951c6b96774d068"
