@@ -36,9 +36,9 @@ for run in one two; do
     "$temporary/dist-$run" >/dev/null
 done
 cmp --silent \
-  "$temporary/dist-one/mysql-0.1.0-rc.1.sigil-plugin.tar.zst" \
-  "$temporary/dist-two/mysql-0.1.0-rc.1.sigil-plugin.tar.zst"
-sha256sum "$temporary/dist-one/mysql-0.1.0-rc.1.sigil-plugin.tar.zst" \
-  "$temporary/dist-two/mysql-0.1.0-rc.1.sigil-plugin.tar.zst"
+  "$temporary/dist-one/mysql-0.1.0.sigil-plugin.tar.zst" \
+  "$temporary/dist-two/mysql-0.1.0.sigil-plugin.tar.zst"
+sha256sum "$temporary/dist-one/mysql-0.1.0.sigil-plugin.tar.zst" \
+  "$temporary/dist-two/mysql-0.1.0.sigil-plugin.tar.zst"
 test "$root" = "$(pwd -P)"
 echo "two isolated component builds and repeated canonical packages are byte-identical"
