@@ -44,6 +44,20 @@ struct MysqlConnection {
     state: RefCell<Option<ConnectionState>>,
 }
 
+struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
 fn driver_error(class: ErrorClass, message: &str) -> Error {
     Error {
         class,
@@ -115,8 +129,12 @@ fn write_packet(stream: &net::Stream, sequence: u8, payload: &[u8]) -> Result<()
     if payload.len() > MAX_PACKET_PAYLOAD {
         return Err(map_codec_error(CodecError::Limit));
     }
-    let packet = protocol::frame_packet(payload, sequence).map_err(map_codec_error)?;
-    stream.write_all(&packet).map_err(map_net_error)?;
+    // The host's inclusive per-call ceiling is exactly one MiB. Keep the
+    // four-byte MySQL header in its own bounded call so a maximum-size payload
+    // remains representable without an oversized write or a second full copy.
+    let header = protocol::packet_header(payload.len(), sequence).map_err(map_codec_error)?;
+    stream.write_all(&header).map_err(map_net_error)?;
+    stream.write_all(payload).map_err(map_net_error)?;
     stream.flush().map_err(map_net_error)
 }
 
@@ -138,10 +156,12 @@ fn caching_sha2_token(password: &[u8], nonce: &[u8]) -> Vec<u8> {
 }
 
 fn connect_mysql(options: ConnectOptions) -> Result<MysqlConnection, Error> {
-    let username = secrets::get(&options.username_secret).map_err(map_secret_error)?;
-    let password = secrets::get(&options.password_secret).map_err(map_secret_error)?;
-    if username.is_empty()
-        || username.contains(&0)
+    let mut username =
+        SecretBytes(secrets::get(&options.username_secret).map_err(map_secret_error)?);
+    let mut password =
+        SecretBytes(secrets::get(&options.password_secret).map_err(map_secret_error)?);
+    if username.0.is_empty()
+        || username.0.contains(&0)
         || options
             .database
             .as_ref()
@@ -155,6 +175,7 @@ fn connect_mysql(options: ConnectOptions) -> Result<MysqlConnection, Error> {
     let handshake = protocol::parse_handshake(&handshake_bytes).map_err(map_codec_error)?;
     if handshake.server_capabilities & CLIENT_REQUIRED != CLIENT_REQUIRED
         || handshake.auth_plugin != "caching_sha2_password"
+        || !protocol::supported_utf8_collation(u16::from(handshake.character_set))
     {
         return Err(map_codec_error(CodecError::Unsupported));
     }
@@ -167,20 +188,22 @@ fn connect_mysql(options: ConnectOptions) -> Result<MysqlConnection, Error> {
     write_packet(&stream, 1, &ssl_request)?;
     stream.upgrade_tls().map_err(map_net_error)?;
 
-    let token = caching_sha2_token(&password, &handshake.auth_data);
-    let response = protocol::handshake_response(
-        capabilities,
-        handshake.character_set,
-        &username,
-        &token,
-        options.database.as_deref(),
-    )
-    .map_err(map_codec_error)?;
-    write_packet(&stream, 2, &response)?;
+    let token = SecretBytes(caching_sha2_token(&password.0, &handshake.auth_data));
+    let response = SecretBytes(
+        protocol::handshake_response(
+            capabilities,
+            handshake.character_set,
+            &username.0,
+            &token.0,
+            options.database.as_deref(),
+        )
+        .map_err(map_codec_error)?,
+    );
+    write_packet(&stream, 2, &response.0)?;
 
     let secret_refs = [
-        (options.username_secret.as_str(), username.as_slice()),
-        (options.password_secret.as_str(), password.as_slice()),
+        (options.username_secret.as_str(), username.0.as_slice()),
+        (options.password_secret.as_str(), password.0.as_slice()),
     ];
     let auth = read_packet(&stream, 3)?;
     match protocol::parse_auth_response(&auth, &secret_refs).map_err(map_codec_error)? {
@@ -190,10 +213,9 @@ fn connect_mysql(options: ConnectOptions) -> Result<MysqlConnection, Error> {
             protocol::parse_ok_or_error(&complete, &secret_refs, true).map_err(map_codec_error)?;
         }
         protocol::AuthResponse::FullAuthentication => {
-            let mut cleartext = password.clone();
-            cleartext.push(0);
-            write_packet(&stream, 4, &cleartext)?;
-            cleartext.fill(0);
+            let mut cleartext = SecretBytes(password.0.clone());
+            cleartext.0.push(0);
+            write_packet(&stream, 4, &cleartext.0)?;
             let complete = read_packet(&stream, 5)?;
             protocol::parse_ok_or_error(&complete, &secret_refs, true).map_err(map_codec_error)?;
         }
@@ -203,8 +225,8 @@ fn connect_mysql(options: ConnectOptions) -> Result<MysqlConnection, Error> {
         state: RefCell::new(Some(ConnectionState {
             stream,
             secrets: vec![
-                (options.username_secret, username),
-                (options.password_secret, password),
+                (options.username_secret, username.take()),
+                (options.password_secret, password.take()),
             ],
         })),
     })
@@ -230,7 +252,10 @@ impl GuestConnection for MysqlConnection {
         let mut command = Vec::with_capacity(sql.len().saturating_add(1));
         command.push(0x03);
         command.extend_from_slice(sql.as_bytes());
-        write_packet(&connection.stream, 0, &command)?;
+        if let Err(error) = write_packet(&connection.stream, 0, &command) {
+            close_connection_state(&mut state);
+            return Err(error);
+        }
         let secret_refs: Vec<(&str, &[u8])> = connection
             .secrets
             .iter()
@@ -249,19 +274,26 @@ impl GuestConnection for MysqlConnection {
                 })
             },
             &secret_refs,
-        )
-        .map_err(|error| match error {
-            protocol::QueryError::Codec(error) => map_codec_error(error),
-            protocol::QueryError::Io(protocol::IoError::Timeout) => {
-                driver_error(ErrorClass::Timeout, "network operation timed out")
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let error = match error {
+                    protocol::QueryError::Codec(error) => map_codec_error(error),
+                    protocol::QueryError::Io(protocol::IoError::Timeout) => {
+                        driver_error(ErrorClass::Timeout, "network operation timed out")
+                    }
+                    protocol::QueryError::Io(protocol::IoError::Limit) => {
+                        driver_error(ErrorClass::Limit, "network limit exceeded")
+                    }
+                    protocol::QueryError::Io(protocol::IoError::Transport) => {
+                        driver_error(ErrorClass::Transport, "network operation failed")
+                    }
+                };
+                close_connection_state(&mut state);
+                return Err(error);
             }
-            protocol::QueryError::Io(protocol::IoError::Limit) => {
-                driver_error(ErrorClass::Limit, "network limit exceeded")
-            }
-            protocol::QueryError::Io(protocol::IoError::Transport) => {
-                driver_error(ErrorClass::Transport, "network operation failed")
-            }
-        })?;
+        };
         Ok(match result {
             RawQueryResult::Command { affected_rows } => {
                 QueryResult::Command(CommandResult { affected_rows })
@@ -300,23 +332,22 @@ impl GuestConnection for MysqlConnection {
     }
 
     fn close(&self) {
-        if let Some(mut connection) = self.state.borrow_mut().take() {
-            connection.stream.close();
-            for (_name, secret) in &mut connection.secrets {
-                secret.fill(0);
-            }
+        close_connection_state(&mut self.state.borrow_mut());
+    }
+}
+
+fn close_connection_state(state: &mut Option<ConnectionState>) {
+    if let Some(mut connection) = state.take() {
+        connection.stream.close();
+        for (_name, secret) in &mut connection.secrets {
+            secret.fill(0);
         }
     }
 }
 
 impl Drop for MysqlConnection {
     fn drop(&mut self) {
-        if let Some(mut connection) = self.state.get_mut().take() {
-            connection.stream.close();
-            for (_name, secret) in &mut connection.secrets {
-                secret.fill(0);
-            }
-        }
+        close_connection_state(self.state.get_mut());
     }
 }
 
@@ -340,5 +371,58 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), 32);
         assert!(caching_sha2_token(b"", nonce).is_empty());
+    }
+
+    #[test]
+    fn sql_limit_precedes_resource_state_and_closed_is_idempotent() {
+        let connection = MysqlConnection {
+            state: RefCell::new(None),
+        };
+        let accepted_boundary =
+            <MysqlConnection as GuestConnection>::query(&connection, "x".repeat(MAX_SQL_BYTES))
+                .expect_err("inclusive SQL maximum reaches the closed-resource check");
+        assert_eq!(accepted_boundary.class, ErrorClass::Closed);
+
+        let rejected =
+            <MysqlConnection as GuestConnection>::query(&connection, "x".repeat(MAX_SQL_BYTES + 1))
+                .expect_err("maximum plus one must be rejected before resource use");
+        assert_eq!(rejected.class, ErrorClass::Limit);
+        <MysqlConnection as GuestConnection>::close(&connection);
+        <MysqlConnection as GuestConnection>::close(&connection);
+    }
+
+    #[test]
+    fn host_result_mapping_is_closed_and_source_free() {
+        use bindings::sigil::host::net::Error as NetError;
+
+        for (source, expected) in [
+            (
+                NetError::Unavailable("target".to_owned()),
+                ErrorClass::Transport,
+            ),
+            (NetError::Io("socket".to_owned()), ErrorClass::Transport),
+            (
+                NetError::Timeout("deadline".to_owned()),
+                ErrorClass::Timeout,
+            ),
+            (NetError::Limit("quota".to_owned()), ErrorClass::Limit),
+            (
+                NetError::Denied("authority".to_owned()),
+                ErrorClass::Transport,
+            ),
+            (
+                NetError::Tls("certificate".to_owned()),
+                ErrorClass::Transport,
+            ),
+        ] {
+            let mapped = map_net_error(source);
+            assert_eq!(mapped.class, expected);
+            assert_eq!(mapped.vendor_code, None);
+            assert_eq!(mapped.sqlstate, None);
+            assert!(!mapped.message.contains("target"));
+            assert!(!mapped.message.contains("socket"));
+            assert!(!mapped.message.contains("authority"));
+            assert!(!mapped.message.contains("certificate"));
+        }
     }
 }

@@ -45,6 +45,17 @@ pub enum QueryError {
     Codec(CodecError),
 }
 
+fn checked_accumulate(
+    current: usize,
+    increment: usize,
+    maximum: usize,
+) -> Result<usize, CodecError> {
+    current
+        .checked_add(increment)
+        .filter(|value| *value <= maximum)
+        .ok_or(CodecError::Limit)
+}
+
 impl From<CodecError> for QueryError {
     fn from(value: CodecError) -> Self {
         Self::Codec(value)
@@ -190,17 +201,13 @@ pub fn parse_packet_header(header: &[u8]) -> Result<(usize, u8), CodecError> {
     Ok((payload, sequence))
 }
 
-pub fn frame_packet(payload: &[u8], sequence: u8) -> Result<Vec<u8>, CodecError> {
-    if payload.len() > MAX_PACKET_PAYLOAD || payload.len() > 0x00ff_ffff {
+pub fn packet_header(payload_len: usize, sequence: u8) -> Result<[u8; 4], CodecError> {
+    if payload_len > MAX_PACKET_PAYLOAD || payload_len > 0x00ff_ffff {
         return Err(CodecError::Limit);
     }
-    let length = u32::try_from(payload.len()).map_err(|_| CodecError::Limit)?;
-    let mut packet = Vec::with_capacity(payload.len().checked_add(4).ok_or(CodecError::Limit)?);
+    let length = u32::try_from(payload_len).map_err(|_| CodecError::Limit)?;
     let bytes = length.to_le_bytes();
-    packet.extend_from_slice(&bytes[..3]);
-    packet.push(sequence);
-    packet.extend_from_slice(payload);
-    Ok(packet)
+    Ok([bytes[0], bytes[1], bytes[2], sequence])
 }
 
 pub fn parse_handshake(payload: &[u8]) -> Result<Handshake, CodecError> {
@@ -302,6 +309,12 @@ fn terminator_status(payload: &[u8]) -> Result<Option<u16>, CodecError> {
     if payload.first() != Some(&0xfe) {
         return Ok(None);
     }
+    // In the text protocol, 0xfe begins a row's eight-byte length encoding
+    // whenever the packet is at least nine bytes. Treating that row as EOF
+    // would silently discard hostile oversized fields as successful output.
+    if payload.len() >= 9 {
+        return Ok(None);
+    }
     if payload.len() == 5 {
         let mut cursor = Cursor::new(payload);
         cursor.take(3)?;
@@ -360,7 +373,7 @@ fn sanitize_error(bytes: &[u8], secrets: &[(&str, &[u8])]) -> Result<String, Cod
     if bytes.len() > MAX_ERROR_BYTES {
         return Err(CodecError::Limit);
     }
-    let mut output = Vec::with_capacity(bytes.len());
+    let mut output = Vec::with_capacity(MAX_SANITIZED_ERROR_BYTES);
     let mut index = 0;
     while index < bytes.len() {
         let matched = secrets
@@ -378,31 +391,49 @@ fn sanitize_error(bytes: &[u8], secrets: &[(&str, &[u8])]) -> Result<String, Cod
                 },
             );
         if let Some((_name, value)) = matched {
+            if output
+                .len()
+                .checked_add(10)
+                .is_none_or(|length| length > MAX_SANITIZED_ERROR_BYTES)
+            {
+                return Err(CodecError::Limit);
+            }
             output.extend_from_slice(b"[REDACTED]");
             index = index.checked_add(value.len()).ok_or(CodecError::Limit)?;
         } else {
+            if output.len() == MAX_SANITIZED_ERROR_BYTES {
+                return Err(CodecError::Limit);
+            }
             output.push(bytes[index]);
             index = index.checked_add(1).ok_or(CodecError::Limit)?;
-        }
-        if output.len() > MAX_SANITIZED_ERROR_BYTES {
-            return Err(CodecError::Limit);
         }
     }
     let value = std::str::from_utf8(&output).map_err(|_| CodecError::Encoding)?;
     if value.chars().count() > MAX_ERROR_SCALARS {
         return Err(CodecError::Limit);
     }
-    let mut sanitized = String::with_capacity(value.len());
+    let mut sanitized = String::with_capacity(MAX_SANITIZED_ERROR_BYTES);
     for character in value.chars() {
         if forbidden_scalar(character) {
             use std::fmt::Write as _;
+            if sanitized
+                .len()
+                .checked_add(8)
+                .is_none_or(|length| length > MAX_SANITIZED_ERROR_BYTES)
+            {
+                return Err(CodecError::Limit);
+            }
             write!(&mut sanitized, "\\u{{{:04X}}}", u32::from(character))
                 .map_err(|_| CodecError::Limit)?;
         } else {
+            if sanitized
+                .len()
+                .checked_add(character.len_utf8())
+                .is_none_or(|length| length > MAX_SANITIZED_ERROR_BYTES)
+            {
+                return Err(CodecError::Limit);
+            }
             sanitized.push(character);
-        }
-        if sanitized.len() > MAX_SANITIZED_ERROR_BYTES {
-            return Err(CodecError::Limit);
         }
     }
     Ok(sanitized)
@@ -443,7 +474,7 @@ pub fn parse_ok_or_error(
     authentication: bool,
 ) -> Result<(), CodecError> {
     match payload.first().copied() {
-        Some(0x00) => Ok(()),
+        Some(0x00) => parse_ok_affected_rows(payload).map(|_affected_rows| ()),
         Some(0xff) => Err(parse_server_error(payload, secrets, authentication)?),
         _ => Err(CodecError::Protocol),
     }
@@ -454,7 +485,7 @@ pub fn parse_auth_response(
     secrets: &[(&str, &[u8])],
 ) -> Result<AuthResponse, CodecError> {
     match payload {
-        [0x00, ..] => Ok(AuthResponse::Complete),
+        [0x00, ..] => parse_ok_affected_rows(payload).map(|_affected_rows| AuthResponse::Complete),
         [0xff, ..] => Err(parse_server_error(payload, secrets, true)?),
         [0x01, 0x03] => Ok(AuthResponse::FastComplete),
         [0x01, 0x04] => Ok(AuthResponse::FullAuthentication),
@@ -536,14 +567,46 @@ fn parse_column(payload: &[u8]) -> Result<RawColumn, CodecError> {
     })
 }
 
-const fn supported_utf8_collation(collation: u16) -> bool {
+pub const fn supported_utf8_collation(collation: u16) -> bool {
     matches!(collation, 33 | 45 | 46 | 76 | 83 | 192..=247 | 255..=323)
 }
 
-fn parse_row(payload: &[u8], columns: &[RawColumn]) -> Result<Vec<RawCell>, CodecError> {
+const BINARY_FLAG: u16 = 0x0080;
+
+const fn column_is_text(column: &RawColumn) -> Result<bool, CodecError> {
+    if column.collation == 0 || column.collation > 323 {
+        return Err(CodecError::Protocol);
+    }
+    Ok(column.flags & BINARY_FLAG == 0
+        && column.collation != 63
+        && supported_utf8_collation(column.collation))
+}
+
+fn parse_row(
+    payload: &[u8],
+    columns: &[RawColumn],
+    maximum_cell_bytes: usize,
+) -> Result<(Vec<RawCell>, usize), CodecError> {
     if payload.len() > MAX_ROW_BYTES {
         return Err(CodecError::Limit);
     }
+    // Validate every field and the aggregate budget before allocating any
+    // returned cell. The second pass performs the exact lossless conversion.
+    let mut preflight = Cursor::new(payload);
+    let mut cell_bytes = 0_usize;
+    for column in columns {
+        let Some(value) = preflight.lenenc_bytes(MAX_FIELD_BYTES)? else {
+            continue;
+        };
+        cell_bytes = checked_accumulate(cell_bytes, value.len(), maximum_cell_bytes)?;
+        if column_is_text(column)? {
+            std::str::from_utf8(value).map_err(|_| CodecError::Encoding)?;
+        }
+    }
+    if !preflight.remaining().is_empty() {
+        return Err(CodecError::Protocol);
+    }
+
     let mut cursor = Cursor::new(payload);
     let mut cells = Vec::with_capacity(columns.len());
     for column in columns {
@@ -551,9 +614,7 @@ fn parse_row(payload: &[u8], columns: &[RawColumn]) -> Result<Vec<RawCell>, Code
             cells.push(RawCell::Null);
             continue;
         };
-        if column.collation == 63 {
-            cells.push(RawCell::Bytes(value.to_vec()));
-        } else if supported_utf8_collation(column.collation) {
+        if column_is_text(column)? {
             let text = std::str::from_utf8(value).map_err(|_| CodecError::Encoding)?;
             cells.push(RawCell::Text(text.to_owned()));
         } else {
@@ -563,7 +624,7 @@ fn parse_row(payload: &[u8], columns: &[RawColumn]) -> Result<Vec<RawCell>, Code
     if !cursor.remaining().is_empty() {
         return Err(CodecError::Protocol);
     }
-    Ok(cells)
+    Ok((cells, cell_bytes))
 }
 
 pub fn read_query_result(
@@ -597,25 +658,19 @@ pub fn read_query_result(
     let mut metadata_bytes = 0_usize;
     for _ in 0..column_count {
         sequence = sequence.wrapping_add(1);
-        packets = packets.checked_add(1).ok_or(CodecError::Limit)?;
-        if packets > MAX_PACKETS {
-            return Err(CodecError::Limit.into());
-        }
+        packets = checked_accumulate(packets, 1, MAX_PACKETS)?;
         let payload = read(sequence).map_err(QueryError::Io)?;
-        metadata_bytes = metadata_bytes
-            .checked_add(payload.len())
-            .filter(|value| *value <= MAX_METADATA_BYTES)
-            .ok_or(CodecError::Limit)?;
+        metadata_bytes = checked_accumulate(metadata_bytes, payload.len(), MAX_METADATA_BYTES)?;
         columns.push(parse_column(&payload)?);
     }
 
     sequence = sequence.wrapping_add(1);
-    packets = packets.checked_add(1).ok_or(CodecError::Limit)?;
+    packets = checked_accumulate(packets, 1, MAX_PACKETS)?;
     let mut payload = read(sequence).map_err(QueryError::Io)?;
     if let Some(status) = terminator_status(&payload)? {
         reject_more_results(status)?;
         sequence = sequence.wrapping_add(1);
-        packets = packets.checked_add(1).ok_or(CodecError::Limit)?;
+        packets = checked_accumulate(packets, 1, MAX_PACKETS)?;
         payload = read(sequence).map_err(QueryError::Io)?;
     }
 
@@ -636,26 +691,16 @@ pub fn read_query_result(
         if rows.len() >= MAX_ROWS {
             return Err(CodecError::Limit.into());
         }
-        let cells = parse_row(&payload, &columns)?;
-        total_cells = total_cells
-            .checked_add(cells.len())
-            .filter(|value| *value <= MAX_CELLS)
+        let remaining_cell_bytes = MAX_CELL_PAYLOAD_BYTES
+            .checked_sub(total_cell_bytes)
             .ok_or(CodecError::Limit)?;
-        let row_cell_bytes = cells.iter().try_fold(0_usize, |sum, cell| {
-            let length = match cell {
-                RawCell::Null => 0,
-                RawCell::Text(value) => value.len(),
-                RawCell::Bytes(value) => value.len(),
-            };
-            sum.checked_add(length).ok_or(CodecError::Limit)
-        })?;
-        total_cell_bytes = total_cell_bytes
-            .checked_add(row_cell_bytes)
-            .filter(|value| *value <= MAX_CELL_PAYLOAD_BYTES)
-            .ok_or(CodecError::Limit)?;
+        let (cells, row_cell_bytes) = parse_row(&payload, &columns, remaining_cell_bytes)?;
+        total_cells = checked_accumulate(total_cells, cells.len(), MAX_CELLS)?;
+        total_cell_bytes =
+            checked_accumulate(total_cell_bytes, row_cell_bytes, MAX_CELL_PAYLOAD_BYTES)?;
         rows.push(cells);
         sequence = sequence.wrapping_add(1);
-        packets = packets.checked_add(1).ok_or(CodecError::Limit)?;
+        packets = checked_accumulate(packets, 1, MAX_PACKETS)?;
         payload = read(sequence).map_err(QueryError::Io)?;
     }
     Ok(RawQueryResult::Rows { columns, rows })
@@ -673,15 +718,74 @@ mod tests {
     }
 
     #[test]
-    fn frame_and_header_enforce_inclusive_packet_cap() {
-        let payload = vec![7; MAX_PACKET_PAYLOAD];
-        let packet = frame_packet(&payload, 9).expect("inclusive maximum");
+    fn packet_header_enforces_inclusive_packet_cap() {
+        let header = packet_header(MAX_PACKET_PAYLOAD, 9).expect("inclusive maximum");
+        assert_eq!(parse_packet_header(&header), Ok((MAX_PACKET_PAYLOAD, 9)));
         assert_eq!(
-            parse_packet_header(&packet[..4]),
-            Ok((MAX_PACKET_PAYLOAD, 9))
+            packet_header(MAX_PACKET_PAYLOAD + 1, 0),
+            Err(CodecError::Limit)
         );
+    }
+
+    #[test]
+    fn every_aggregate_counter_is_inclusive_checked_and_zero_stable() {
+        for maximum in [
+            MAX_METADATA_BYTES,
+            MAX_CELLS,
+            MAX_CELL_PAYLOAD_BYTES,
+            MAX_PACKETS,
+        ] {
+            assert_eq!(checked_accumulate(0, 0, maximum), Ok(0));
+            assert_eq!(checked_accumulate(0, maximum, maximum), Ok(maximum));
+            assert_eq!(
+                checked_accumulate(maximum, 1, maximum),
+                Err(CodecError::Limit)
+            );
+            assert_eq!(
+                checked_accumulate(usize::MAX, 1, maximum),
+                Err(CodecError::Limit)
+            );
+        }
+    }
+
+    #[test]
+    fn field_and_decoded_row_payload_bounds_are_independently_exact() {
+        let mut maximum_field = vec![0xfd, 0x00, 0x00, 0x10];
+        maximum_field.resize(maximum_field.len() + MAX_FIELD_BYTES, b'x');
+        let mut cursor = Cursor::new(&maximum_field);
         assert_eq!(
-            frame_packet(&vec![7; MAX_PACKET_PAYLOAD + 1], 0),
+            cursor
+                .lenenc_bytes(MAX_FIELD_BYTES)
+                .expect("inclusive field maximum")
+                .map(<[u8]>::len),
+            Some(MAX_FIELD_BYTES)
+        );
+        let mut oversized_field = Cursor::new(&[0xfd, 0x01, 0x00, 0x10]);
+        assert_eq!(
+            oversized_field.lenenc_bytes(MAX_FIELD_BYTES),
+            Err(CodecError::Limit)
+        );
+
+        let row_field_bytes = MAX_ROW_BYTES - 4;
+        let length = u32::try_from(row_field_bytes)
+            .expect("row length")
+            .to_le_bytes();
+        let mut maximum_row = vec![0xfd, length[0], length[1], length[2]];
+        maximum_row.resize(MAX_ROW_BYTES, b'x');
+        let parsed = parse_row(&maximum_row, &[column(63)], MAX_CELL_PAYLOAD_BYTES)
+            .expect("inclusive row maximum");
+        assert_eq!(
+            parsed,
+            (
+                vec![RawCell::Bytes(vec![b'x'; row_field_bytes])],
+                row_field_bytes
+            )
+        );
+
+        let mut oversized_row = maximum_row;
+        oversized_row.push(0);
+        assert_eq!(
+            parse_row(&oversized_row, &[column(63)], MAX_CELL_PAYLOAD_BYTES),
             Err(CodecError::Limit)
         );
     }
@@ -692,6 +796,77 @@ mod tests {
         assert_eq!(
             sanitize_error(b"xabcdy\n", &secrets),
             Ok("x[REDACTED]y\\u{000A}".to_owned())
+        );
+        let maximum_controls = vec![b'\n'; MAX_ERROR_SCALARS];
+        let sanitized = sanitize_error(&maximum_controls, &[]).expect("inclusive sanitized cap");
+        assert_eq!(sanitized.len(), MAX_SANITIZED_ERROR_BYTES);
+        assert!(sanitized.bytes().all(|byte| byte.is_ascii()));
+        assert_eq!(
+            sanitize_error(&vec![b'a'; MAX_ERROR_SCALARS], &[("one-byte", b"a")]),
+            Err(CodecError::Limit)
+        );
+    }
+
+    #[test]
+    fn labels_sqlstate_and_errors_enforce_every_string_boundary() {
+        assert_eq!(safe_label("☃".as_bytes()), Ok("☃".to_owned()));
+        let maximum_label = "😀".repeat(MAX_LABEL_SCALARS);
+        assert_eq!(maximum_label.len(), MAX_LABEL_BYTES);
+        assert_eq!(safe_label(maximum_label.as_bytes()), Ok(maximum_label));
+        assert_eq!(
+            safe_label("😀".repeat(MAX_LABEL_SCALARS + 1).as_bytes()),
+            Err(CodecError::Limit)
+        );
+        assert_eq!(safe_label(b"line\nfeed"), Err(CodecError::Encoding));
+        assert_eq!(safe_label(&[0xff]), Err(CodecError::Encoding));
+        assert_eq!(validate_sqlstate(b"HY000"), Ok("HY000".to_owned()));
+        assert_eq!(validate_sqlstate(b"hy000"), Err(CodecError::Protocol));
+        assert_eq!(validate_sqlstate(b"HY00"), Err(CodecError::Protocol));
+        assert_eq!(
+            sanitize_error(&vec![b'a'; MAX_ERROR_BYTES], &[]),
+            Err(CodecError::Limit)
+        );
+        assert_eq!(
+            sanitize_error(&vec![b'a'; MAX_ERROR_SCALARS], &[]),
+            Ok("a".repeat(MAX_ERROR_SCALARS))
+        );
+        assert_eq!(sanitize_error(&[0xff], &[]), Err(CodecError::Encoding));
+    }
+
+    #[test]
+    fn authentication_states_and_server_errors_are_closed_and_sanitized() {
+        assert_eq!(
+            parse_auth_response(&[0x00, 0, 0, 0, 0, 0, 0], &[]),
+            Ok(AuthResponse::Complete)
+        );
+        assert_eq!(parse_auth_response(&[0x00], &[]), Err(CodecError::Protocol));
+        assert_eq!(
+            parse_auth_response(&[0x01, 0x03], &[]),
+            Ok(AuthResponse::FastComplete)
+        );
+        assert_eq!(
+            parse_auth_response(&[0x01, 0x04], &[]),
+            Ok(AuthResponse::FullAuthentication)
+        );
+        assert_eq!(
+            parse_auth_response(&[0xfe, 0], &[]),
+            Err(CodecError::Unsupported)
+        );
+        assert_eq!(
+            parse_auth_response(&[0x01, 0x05], &[]),
+            Err(CodecError::Protocol)
+        );
+
+        let mut packet = vec![0xff, 0x15, 0x04, b'#'];
+        packet.extend_from_slice(b"28000");
+        packet.extend_from_slice(b"bad secret\n");
+        assert_eq!(
+            parse_auth_response(&packet, &[("password", b"secret")]),
+            Err(CodecError::Authentication(ServerError {
+                vendor_code: 1045,
+                sqlstate: Some("28000".to_owned()),
+                message: "bad [REDACTED]\\u{000A}".to_owned(),
+            }))
         );
     }
 
@@ -713,12 +888,26 @@ mod tests {
     #[test]
     fn supported_invalid_utf8_is_encoding_and_binary_is_exact() {
         assert_eq!(
-            parse_row(&[1, 0xff], &[column(255)]),
+            parse_row(&[1, 0xff], &[column(255)], MAX_CELL_PAYLOAD_BYTES),
             Err(CodecError::Encoding)
         );
         assert_eq!(
-            parse_row(&[1, 0xff], &[column(63)]),
-            Ok(vec![RawCell::Bytes(vec![0xff])])
+            parse_row(&[1, 0xff], &[column(63)], MAX_CELL_PAYLOAD_BYTES),
+            Ok((vec![RawCell::Bytes(vec![0xff])], 1))
+        );
+        let mut flagged = column(255);
+        flagged.flags = BINARY_FLAG;
+        assert_eq!(
+            parse_row(&[1, 0xff], &[flagged], MAX_CELL_PAYLOAD_BYTES),
+            Ok((vec![RawCell::Bytes(vec![0xff])], 1))
+        );
+        assert_eq!(
+            parse_row(&[0], &[column(0)], MAX_CELL_PAYLOAD_BYTES),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            parse_row(&[0], &[column(u16::MAX)], MAX_CELL_PAYLOAD_BYTES),
+            Err(CodecError::Protocol)
         );
     }
 
@@ -762,6 +951,68 @@ mod tests {
     }
 
     #[test]
+    fn row_limit_is_inclusive_and_maximum_plus_one_has_no_partial_result() {
+        fn run(row_count: usize) -> Result<RawQueryResult, QueryError> {
+            let column = {
+                let mut packet = Vec::new();
+                for value in [b"def".as_slice(), b"", b"", b"", b"x", b"x"] {
+                    packet.extend(lenenc(value));
+                }
+                packet.extend([0x0c, 0xff, 0x00, 0, 0, 0, 0, 0xfd, 0, 0, 0, 0, 0]);
+                packet
+            };
+            let mut reads = 0_usize;
+            read_query_result(
+                |_sequence| {
+                    let payload = match reads {
+                        0 => vec![1],
+                        1 => column.clone(),
+                        2 => vec![0xfe, 0, 0, 0, 0],
+                        index if index < row_count + 3 => vec![0],
+                        _ => vec![0xfe, 0, 0, 0, 0],
+                    };
+                    reads += 1;
+                    Ok(payload)
+                },
+                &[],
+            )
+        }
+
+        let result = run(MAX_ROWS).expect("inclusive row maximum");
+        let RawQueryResult::Rows { rows, .. } = result else {
+            panic!("row fixture returned command result");
+        };
+        assert_eq!(rows.len(), MAX_ROWS);
+        assert_eq!(run(MAX_ROWS + 1), Err(CodecError::Limit.into()));
+    }
+
+    #[test]
+    fn local_infile_io_failures_and_server_errors_have_exact_classes() {
+        assert_eq!(
+            read_query_result(|_sequence| Ok(vec![0xfb]), &[]),
+            Err(CodecError::Unsupported.into())
+        );
+        for (io, expected) in [
+            (IoError::Transport, QueryError::Io(IoError::Transport)),
+            (IoError::Timeout, QueryError::Io(IoError::Timeout)),
+            (IoError::Limit, QueryError::Io(IoError::Limit)),
+        ] {
+            assert_eq!(read_query_result(|_sequence| Err(io), &[]), Err(expected));
+        }
+        let mut server = vec![0xff, 0xd2, 0x04, b'#'];
+        server.extend_from_slice(b"HY000server refused");
+        assert_eq!(
+            read_query_result(|_sequence| Ok(server.clone()), &[]),
+            Err(CodecError::Server(ServerError {
+                vendor_code: 1234,
+                sqlstate: Some("HY000".to_owned()),
+                message: "server refused".to_owned(),
+            })
+            .into())
+        );
+    }
+
+    #[test]
     fn command_and_row_terminators_reject_additional_results() {
         assert_eq!(parse_ok_affected_rows(&[0x00, 3, 0, 0, 0, 0, 0]), Ok(3));
         assert_eq!(
@@ -774,6 +1025,12 @@ mod tests {
             Ok(Some(SERVER_MORE_RESULTS_EXISTS))
         );
         assert_eq!(terminator_status(&[0xfe, 0, 0, 0, 0, 0, 0]), Ok(Some(0)));
+        let oversized_lenenc_row = [0xfe, 1, 0, 16, 0, 0, 0, 0, 0];
+        assert_eq!(terminator_status(&oversized_lenenc_row), Ok(None));
+        assert_eq!(
+            parse_row(&oversized_lenenc_row, &[column(63)], MAX_CELL_PAYLOAD_BYTES),
+            Err(CodecError::Limit)
+        );
     }
 
     #[test]
@@ -828,7 +1085,7 @@ mod tests {
             let _ = parse_auth_response(&bytes, &[]);
             let _ = parse_ok_affected_rows(&bytes);
             let _ = parse_column(&bytes);
-            let _ = parse_row(&bytes, &[column(255)]);
+            let _ = parse_row(&bytes, &[column(255)], MAX_CELL_PAYLOAD_BYTES);
             let _ = terminator_status(&bytes);
         }
 
