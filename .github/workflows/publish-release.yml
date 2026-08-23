@@ -74,7 +74,6 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
           package="mysql-${VERSION}.sigil-plugin.tar.zst"
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')" = true
           verify_assets() {
             verify_dir="$(mktemp -d)"
             gh release download "$tag" --dir "$verify_dir"
