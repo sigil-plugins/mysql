@@ -135,6 +135,14 @@ jobs:
           ensure_draft_asset "$package" "dist/$package" "$PACKAGE_SHA256"
           ensure_draft_asset "SHA256SUMS" dist/SHA256SUMS "$CHECKSUMS_SHA256"
           verify_assets
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${tag}" \
+              -f sha="$SOURCE_COMMIT" >/dev/null; then
+              echo "tag creation raced; requiring the winner to be exact" >&2
+            fi
+          fi
+          verify_tag_commit
           gh release edit "$tag" --draft=false --latest=false
           for _ in 1 2 3 4 5 6; do
             if test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true; then
