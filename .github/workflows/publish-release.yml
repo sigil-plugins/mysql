@@ -74,29 +74,72 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
           package="mysql-${VERSION}.sigil-plugin.tar.zst"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "refusing to reuse existing tag ${tag}" >&2
-            exit 1
-          fi
+          verify_assets() {
+            verify_dir="$(mktemp -d)"
+            gh release download "$tag" --dir "$verify_dir"
+            test "$(find "$verify_dir" -maxdepth 1 -type f | wc -l)" -eq 2
+            test "$(sha256sum "$verify_dir/$package" | cut -d' ' -f1)" = "$PACKAGE_SHA256"
+            test "$(sha256sum "$verify_dir/SHA256SUMS" | cut -d' ' -f1)" = "$CHECKSUMS_SHA256"
+            test "$(cat "$verify_dir/SHA256SUMS")" = "$PACKAGE_SHA256  $package"
+          }
+          ensure_draft_asset() {
+            asset_name="$1"
+            source_path="$2"
+            expected_sha256="$3"
+            asset_count="$(gh release view "$tag" --json assets --jq \
+              "[.assets[] | select(.name == \"$asset_name\")] | length")"
+            case "$asset_count" in
+              0)
+                gh release upload "$tag" "$source_path"
+                ;;
+              1)
+                existing_dir="$(mktemp -d)"
+                gh release download "$tag" --pattern "$asset_name" --dir "$existing_dir"
+                test "$(sha256sum "$existing_dir/$asset_name" | cut -d' ' -f1)" = "$expected_sha256"
+                ;;
+              *)
+                echo "release has duplicate asset $asset_name" >&2
+                exit 1
+                ;;
+            esac
+          }
+          verify_tag_commit() {
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            test "$(git rev-list -n 1 "$tag")" = "$SOURCE_COMMIT"
+          }
+
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "refusing to reuse existing release ${tag}" >&2
-            exit 1
+            test "$(gh release view "$tag" --json targetCommitish --jq '.targetCommitish')" = "$SOURCE_COMMIT"
+            unexpected_assets="$(gh release view "$tag" --json assets --jq \
+              "[.assets[].name | select(. != \"$package\" and . != \"SHA256SUMS\")] | length")"
+            test "$unexpected_assets" -eq 0
+            if test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = false; then
+              verify_assets
+              verify_tag_commit
+              test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true
+              exit 0
+            fi
+          else
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "refusing a tag without the exact resumable draft ${tag}" >&2
+              exit 1
+            fi
+            gh release create "$tag" \
+              --target "$SOURCE_COMMIT" \
+              --title "mysql ${VERSION}" \
+              --notes "Immutable Sigil MySQL plugin ${VERSION}." \
+              --draft
           fi
-          gh release create "$tag" \
-            --target "$SOURCE_COMMIT" \
-            --title "mysql ${VERSION}" \
-            --notes "Immutable Sigil MySQL plugin ${VERSION}." \
-            --draft \
-            "dist/${package}" dist/SHA256SUMS
-          draft_dir="$(mktemp -d)"
-          gh release download "$tag" --dir "$draft_dir"
-          test "$(sha256sum "$draft_dir/$package" | cut -d' ' -f1)" = "$PACKAGE_SHA256"
-          test "$(sha256sum "$draft_dir/SHA256SUMS" | cut -d' ' -f1)" = "$CHECKSUMS_SHA256"
-          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq '.isDraft')" = true
-          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq '.targetCommitish')" = "$SOURCE_COMMIT"
+
+          test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = true
+          ensure_draft_asset "$package" "dist/$package" "$PACKAGE_SHA256"
+          ensure_draft_asset "SHA256SUMS" dist/SHA256SUMS "$CHECKSUMS_SHA256"
+          verify_assets
           gh release edit "$tag" --draft=false --latest=false
           for _ in 1 2 3 4 5 6; do
             if test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true; then
+              verify_tag_commit
+              verify_assets
               exit 0
             fi
             sleep 5
