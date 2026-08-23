@@ -74,6 +74,7 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
           package="mysql-${VERSION}.sigil-plugin.tar.zst"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')" = true
           verify_assets() {
             verify_dir="$(mktemp -d)"
             gh release download "$tag" --dir "$verify_dir"
@@ -135,6 +136,9 @@ jobs:
           ensure_draft_asset "$package" "dist/$package" "$PACKAGE_SHA256"
           ensure_draft_asset "SHA256SUMS" dist/SHA256SUMS "$CHECKSUMS_SHA256"
           verify_assets
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            verify_tag_commit
+          fi
           gh release edit "$tag" --draft=false --latest=false
           for _ in 1 2 3 4 5 6; do
             if test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true; then
