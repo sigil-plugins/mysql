@@ -3,6 +3,11 @@ set -euo pipefail
 
 root="$(pwd -P)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+version="$(python3 -c 'import tomllib; print(tomllib.load(open("plugin.toml", "rb"))["version"])')"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "plugin.toml version is not canonical SemVer" >&2
+  exit 1
+fi
 rustflags="${RUSTFLAGS:-} --remap-path-prefix=${root}=/workspace --remap-path-prefix=${cargo_home}=/cargo"
 rustflags="${rustflags# }"
 temporary="$(mktemp -d)"
@@ -36,9 +41,9 @@ for run in one two; do
     "$temporary/dist-$run" >/dev/null
 done
 cmp --silent \
-  "$temporary/dist-one/mysql-0.1.0.sigil-plugin.tar.zst" \
-  "$temporary/dist-two/mysql-0.1.0.sigil-plugin.tar.zst"
-sha256sum "$temporary/dist-one/mysql-0.1.0.sigil-plugin.tar.zst" \
-  "$temporary/dist-two/mysql-0.1.0.sigil-plugin.tar.zst"
+  "$temporary/dist-one/mysql-${version}.sigil-plugin.tar.zst" \
+  "$temporary/dist-two/mysql-${version}.sigil-plugin.tar.zst"
+sha256sum "$temporary/dist-one/mysql-${version}.sigil-plugin.tar.zst" \
+  "$temporary/dist-two/mysql-${version}.sigil-plugin.tar.zst"
 test "$root" = "$(pwd -P)"
 echo "two isolated component builds and repeated canonical packages are byte-identical"
