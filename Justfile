@@ -21,5 +21,8 @@ check: sdk-drift
 dist: check
     {{python}} scripts/pack.py plugin.toml dist
 
+release-dist source_commit: check
+    {{python}} scripts/pack.py plugin.toml dist --source-commit "{{source_commit}}"
+
 reproducible:
     ./scripts/reproducible.sh

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Emit Sigil's canonical two-member plugin archive."""
+"""Emit Sigil's canonical package and optional P6 release identity."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -13,6 +14,12 @@ import tempfile
 import tomllib
 
 BLOCK = 512
+COMMIT = re.compile(r"[0-9a-f]{40}")
+SEMVER = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 
 
 def octal_field(width: int, value: int) -> bytes:
@@ -75,10 +82,95 @@ def write_member(stream, archive_path: str, source: Path) -> None:
     stream.write(b"\0" * ((BLOCK - size % BLOCK) % BLOCK))
 
 
+def file_digest(path: Path, algorithm: str) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, algorithm).hexdigest()
+
+
+def blake3_digest(path: Path) -> str:
+    result = subprocess.run(
+        [os.environ.get("B3SUM", "b3sum"), "--no-names", str(path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    digest = result.stdout.decode("ascii").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise RuntimeError("b3sum returned a non-canonical digest")
+    return digest
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def canonical_semver(value: object) -> bool:
+    if not isinstance(value, str) or SEMVER.fullmatch(value) is None:
+        return False
+    release_without_build = value.split("+", maxsplit=1)[0]
+    if "-" not in release_without_build:
+        return True
+    prerelease = release_without_build.split("-", maxsplit=1)[1]
+    return not any(
+        identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+        for identifier in prerelease.split(".")
+    )
+
+
+def release_manifest(
+    parsed: dict[str, object],
+    manifest: Path,
+    component: Path,
+    package: Path,
+    source_commit: str,
+) -> bytes:
+    if COMMIT.fullmatch(source_commit) is None:
+        raise SystemExit("source commit must be exactly 40 lowercase hexadecimal characters")
+    name = parsed.get("name")
+    version = parsed.get("version")
+    repository = parsed.get("repository")
+    source = repository.get("source") if isinstance(repository, dict) else None
+    if not isinstance(source, str) or re.fullmatch(
+        r"github:[a-z0-9_](?:[a-z0-9_-]{0,98}[a-z0-9_])?/[a-z0-9_.](?:[a-z0-9_.-]{0,98}[a-z0-9_.])?",
+        source,
+    ) is None:
+        raise SystemExit("repository source is not canonical GitHub syntax")
+    value = {
+        "schema_version": 1,
+        "source": source,
+        "source_commit": source_commit,
+        "name": name,
+        "version": version,
+        "asset_name": package.name,
+        "package_sha256": f"sha256:{file_digest(package, 'sha256')}",
+        "package_blake3": f"blake3:{blake3_digest(package)}",
+        "manifest_blake3": f"blake3:{blake3_digest(manifest)}",
+        "component_blake3": f"blake3:{blake3_digest(component)}",
+    }
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--source-commit")
     args = parser.parse_args()
 
     manifest = args.manifest
@@ -91,8 +183,8 @@ def main() -> None:
     component_raw = parsed.get("component", {}).get("file")
     if not isinstance(name, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) is None:
         raise SystemExit("manifest plugin name is not canonical")
-    if not isinstance(version, str) or re.fullmatch(r"[0-9A-Za-z.+-]+", version) is None:
-        raise SystemExit("manifest version is not filename-safe")
+    if not canonical_semver(version):
+        raise SystemExit("manifest version is not canonical SemVer")
     if not isinstance(component_raw, str):
         raise SystemExit("manifest component file is missing")
     component_path = PurePosixPath(component_raw)
@@ -137,12 +229,18 @@ def main() -> None:
         temporary_path.unlink(missing_ok=True)
         raise
 
-    with output.open("rb") as handle:
-        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    digest = file_digest(output, "sha256")
     checksum = args.output_dir / "SHA256SUMS"
-    checksum.write_text(f"{digest}  {output.name}\n", encoding="ascii")
+    write_atomic(checksum, f"{digest}  {output.name}\n".encode("ascii"))
     print(output)
     print(checksum)
+    if args.source_commit is not None:
+        release = args.output_dir / "release-manifest.json"
+        write_atomic(
+            release,
+            release_manifest(parsed, manifest, component, output, args.source_commit),
+        )
+        print(release)
 
 
 if __name__ == "__main__":

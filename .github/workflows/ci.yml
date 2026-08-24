@@ -19,6 +19,13 @@ jobs:
           components: clippy,rustfmt
       - uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2
         with:
-          tool: just@1.57.0,wasm-tools@1.252.0
+          tool: just@1.57.0,wasm-tools@1.252.0,b3sum@1.8.3
       - run: just check
       - run: just reproducible
+      - name: Reproduce canonical release identity
+        run: |
+          source_commit=0000000000000000000000000000000000000000
+          just release-dist "$source_commit"
+          first="$(sha256sum dist/*.sigil-plugin.tar.zst dist/SHA256SUMS dist/release-manifest.json)"
+          just release-dist "$source_commit"
+          test "$first" = "$(sha256sum dist/*.sigil-plugin.tar.zst dist/SHA256SUMS dist/release-manifest.json)"
