@@ -16,7 +16,7 @@ protocol, multi-statements/results, `LOCAL INFILE`, retry, or reconnect.
 ## Build
 
 Prerequisites are Rust 1.95.0 with `wasm32-unknown-unknown`, `wasm-tools`
-1.252.0, `just` 1.57.0, Python 3.11+, and zstd 1.5.7.
+1.252.0, `just` 1.57.0, `b3sum` 1.8.3, Python 3.11+, and zstd 1.5.7.
 
 ```sh
 just check
@@ -26,6 +26,14 @@ just dist
 `just sdk-drift` checks the vendored build inputs against the immutable SDK
 revision recorded in `SDK.lock`. `just reproducible` performs two isolated
 builds and compares both the component and canonical package bytes.
+
+Version 0.1.2 is the first keyless-provenance release. The unprivileged
+`prepare-release` workflow builds its package and canonical release manifest
+once from `main`. After explicit digest approval, the protected
+`publish-release` workflow stages and reads back exactly three assets, creates
+one GitHub OIDC/Sigstore package attestation, and publishes an immutable tag and
+release. It has no long-lived signing secret and never resumes or replaces a
+partial version.
 
 ## Lua shape
 

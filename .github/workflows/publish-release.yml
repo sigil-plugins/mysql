@@ -8,11 +8,11 @@ on:
         required: true
         type: string
       source_commit:
-        description: Exact approved 40-hex source commit
+        description: Exact approved 40-hex main commit
         required: true
         type: string
       candidate_run_id:
-        description: prepare-release run containing the approved assets
+        description: Exact first-attempt prepare-release run
         required: true
         type: string
       package_sha256:
@@ -23,134 +23,232 @@ on:
         description: Exact approved SHA256SUMS SHA-256
         required: true
         type: string
+      release_manifest_sha256:
+        description: Exact approved release-manifest.json SHA-256
+        required: true
+        type: string
 
-permissions:
-  actions: read
-  contents: write
+permissions: {}
 
 jobs:
   publish:
     runs-on: ubuntu-24.04
     environment: release
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
-          ref: ${{ inputs.source_commit }}
           persist-credentials: false
+      - name: Verify dispatch and candidate build identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          run_json="$(mktemp)"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" > "$run_json"
+          jq -e --arg repository "$GITHUB_REPOSITORY" --arg commit "$SOURCE_COMMIT" '
+            .repository.full_name == $repository and
+            .path == ".github/workflows/prepare-release.yml" and
+            .event == "workflow_dispatch" and
+            .head_branch == "main" and
+            .head_sha == $commit and
+            .status == "completed" and
+            .conclusion == "success" and
+            .run_attempt == 1
+          ' "$run_json" >/dev/null
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: mysql-candidate-assets
+          name: release-candidate-assets
           path: dist
           github-token: ${{ github.token }}
           run-id: ${{ inputs.candidate_run_id }}
       - name: Verify exact approved unpublished bytes
+        id: release
         env:
           VERSION: ${{ inputs.version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           PACKAGE_SHA256: ${{ inputs.package_sha256 }}
           CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
+          RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
-          package="dist/mysql-${VERSION}.sigil-plugin.tar.zst"
-          test -f "$package"
-          test -f dist/SHA256SUMS
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
-          printf '%s  %s\n' "$PACKAGE_SHA256" "$package" | sha256sum --check --strict
+          [[ "$RELEASE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          name="$(sed -n 's/^name = "\([^"]*\)"$/\1/p' plugin.toml)"
+          source="$(sed -n 's/^source = "\([^"]*\)"$/\1/p' plugin.toml)"
+          test "$source" = "github:${GITHUB_REPOSITORY}"
+          test "$(sed -n 's/^version = "\([^"]*\)"$/\1/p' plugin.toml)" = "$VERSION"
+          package="${name}-${VERSION}.sigil-plugin.tar.zst"
+          test -f "dist/$package" && test ! -L "dist/$package"
+          test -f dist/SHA256SUMS && test ! -L dist/SHA256SUMS
+          test -f dist/release-manifest.json && test ! -L dist/release-manifest.json
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find dist -mindepth 1 -maxdepth 1 | wc -l)" -eq 3
+          printf '%s  %s\n' "$PACKAGE_SHA256" "dist/$package" | sha256sum --check --strict
           printf '%s  %s\n' "$CHECKSUMS_SHA256" dist/SHA256SUMS | sha256sum --check --strict
-          test "$(cat dist/SHA256SUMS)" = "$PACKAGE_SHA256  mysql-${VERSION}.sigil-plugin.tar.zst"
-      - name: Stage, read back, and publish immutable release
+          printf '%s  %s\n' "$RELEASE_MANIFEST_SHA256" dist/release-manifest.json | sha256sum --check --strict
+          test "$(cat dist/SHA256SUMS)" = "$PACKAGE_SHA256  $package"
+          python3 -I - "$name" "$VERSION" "$SOURCE_COMMIT" "$source" "$package" "$PACKAGE_SHA256" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          name, version, commit, source, package, package_sha256 = sys.argv[1:]
+          path = Path("dist/release-manifest.json")
+          raw = path.read_bytes()
+          value = json.loads(raw)
+          assert set(value) == {
+              "schema_version", "source", "source_commit", "name", "version",
+              "asset_name", "package_sha256", "package_blake3",
+              "manifest_blake3", "component_blake3",
+          }
+          assert value["schema_version"] == 1
+          assert value["source"] == source
+          assert value["source_commit"] == commit
+          assert value["name"] == name
+          assert value["version"] == version
+          assert value["asset_name"] == package
+          assert value["package_sha256"] == f"sha256:{package_sha256}"
+          for field in ("package_blake3", "manifest_blake3", "component_blake3"):
+              assert re.fullmatch(r"blake3:[0-9a-f]{64}", value[field])
+          canonical = json.dumps(
+              value, allow_nan=False, ensure_ascii=True, sort_keys=True,
+              separators=(",", ":"),
+          ).encode("ascii")
+          assert raw == canonical
+          PY
+          echo "package_name=$package" >> "$GITHUB_OUTPUT"
+          echo "subject_digest=sha256:$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
+      - name: Stage and read back the exact draft
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           PACKAGE_SHA256: ${{ inputs.package_sha256 }}
           CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
+          RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
         run: |
           set -euo pipefail
           tag="v${VERSION}"
-          package="mysql-${VERSION}.sigil-plugin.tar.zst"
-          verify_assets() {
-            verify_dir="$(mktemp -d)"
-            gh release download "$tag" --dir "$verify_dir"
-            test "$(find "$verify_dir" -maxdepth 1 -type f | wc -l)" -eq 2
-            test "$(sha256sum "$verify_dir/$package" | cut -d' ' -f1)" = "$PACKAGE_SHA256"
-            test "$(sha256sum "$verify_dir/SHA256SUMS" | cut -d' ' -f1)" = "$CHECKSUMS_SHA256"
-            test "$(cat "$verify_dir/SHA256SUMS")" = "$PACKAGE_SHA256  $package"
-          }
-          ensure_draft_asset() {
-            asset_name="$1"
-            source_path="$2"
-            expected_sha256="$3"
-            asset_count="$(gh release view "$tag" --json assets --jq \
-              "[.assets[] | select(.name == \"$asset_name\")] | length")"
-            case "$asset_count" in
-              0)
-                gh release upload "$tag" "$source_path"
-                ;;
-              1)
-                existing_dir="$(mktemp -d)"
-                gh release download "$tag" --pattern "$asset_name" --dir "$existing_dir"
-                test "$(sha256sum "$existing_dir/$asset_name" | cut -d' ' -f1)" = "$expected_sha256"
-                ;;
-              *)
-                echo "release has duplicate asset $asset_name" >&2
-                exit 1
-                ;;
-            esac
-          }
-          verify_tag_commit() {
-            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
-            test "$(git rev-list -n 1 "$tag")" = "$SOURCE_COMMIT"
-          }
-
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "existing tag burns ${tag}; refusing publication" >&2
+            exit 1
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            test "$(gh release view "$tag" --json targetCommitish --jq '.targetCommitish')" = "$SOURCE_COMMIT"
-            unexpected_assets="$(gh release view "$tag" --json assets --jq \
-              "[.assets[].name | select(. != \"$package\" and . != \"SHA256SUMS\")] | length")"
-            test "$unexpected_assets" -eq 0
-            if test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = false; then
-              verify_assets
-              verify_tag_commit
-              test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true
-              exit 0
-            fi
-          else
-            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-              echo "refusing a tag without the exact resumable draft ${tag}" >&2
-              exit 1
-            fi
-            gh release create "$tag" \
-              --target "$SOURCE_COMMIT" \
-              --title "mysql ${VERSION}" \
-              --notes "Immutable Sigil MySQL plugin ${VERSION}." \
-              --draft
+            echo "existing release burns ${tag}; refusing publication" >&2
+            exit 1
           fi
-
-          test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = true
-          ensure_draft_asset "$package" "dist/$package" "$PACKAGE_SHA256"
-          ensure_draft_asset "SHA256SUMS" dist/SHA256SUMS "$CHECKSUMS_SHA256"
-          verify_assets
-          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${tag}" \
-              -f sha="$SOURCE_COMMIT" >/dev/null; then
-              echo "tag creation raced; requiring the winner to be exact" >&2
-            fi
-          fi
-          verify_tag_commit
-          gh release edit "$tag" --draft=false --latest=false
+          status="$(curl --proto '=https' --tlsv1.2 --silent --show-error \
+            --output "${RUNNER_TEMP}/preexisting-attestations.json" --write-out '%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/attestations/sha256:${PACKAGE_SHA256}?predicate_type=provenance&per_page=30")"
+          test "$status" = 404
+          gh release create "$tag" \
+            --target "$SOURCE_COMMIT" \
+            --title "${PACKAGE_NAME%.sigil-plugin.tar.zst}" \
+            --notes "Immutable keyless-provenance Sigil plugin ${VERSION}." \
+            --draft \
+            "dist/$PACKAGE_NAME" dist/SHA256SUMS dist/release-manifest.json
+          release_json="$(mktemp)"
+          gh release view "$tag" --json isDraft,isPrerelease,targetCommitish,assets > "$release_json"
+          jq -e --arg commit "$SOURCE_COMMIT" --arg package "$PACKAGE_NAME" '
+            .isDraft == true and .isPrerelease == false and .targetCommitish == $commit and
+            ([.assets[].name] | sort) == (["SHA256SUMS", "release-manifest.json", $package] | sort)
+          ' "$release_json" >/dev/null
+          readback="$(mktemp -d)"
+          gh release download "$tag" --dir "$readback"
+          test "$(find "$readback" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find "$readback" -mindepth 1 -maxdepth 1 | wc -l)" -eq 3
+          test "$(sha256sum "$readback/$PACKAGE_NAME" | cut -d' ' -f1)" = "$PACKAGE_SHA256"
+          test "$(sha256sum "$readback/SHA256SUMS" | cut -d' ' -f1)" = "$CHECKSUMS_SHA256"
+          test "$(sha256sum "$readback/release-manifest.json" | cut -d' ' -f1)" = "$RELEASE_MANIFEST_SHA256"
+          test "$(cat "$readback/SHA256SUMS")" = "$PACKAGE_SHA256  $PACKAGE_NAME"
+      - name: Create GitHub OIDC build provenance for the exact package
+        id: attest
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ steps.release.outputs.package_name }}
+          subject-digest: ${{ steps.release.outputs.subject_digest }}
+          show-summary: false
+      - name: Publish once and verify immutable public state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
+          RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -n "$ATTESTATION_ID"
+          test -f "$BUNDLE_PATH" && test ! -L "$BUNDLE_PATH"
+          attestation_found=false
           for _ in 1 2 3 4 5 6; do
-            if test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true; then
-              verify_tag_commit
-              verify_assets
-              exit 0
+            status="$(curl --proto '=https' --tlsv1.2 --silent --show-error \
+              --output "${RUNNER_TEMP}/attestations.json" --write-out '%{http_code}' \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/attestations/sha256:${PACKAGE_SHA256}?predicate_type=provenance&per_page=30")"
+            if test "$status" = 200 && jq -e --argjson repository_id "$GITHUB_REPOSITORY_ID" '
+              (.attestations | length) == 1 and
+              .attestations[0].repository_id == $repository_id and
+              .attestations[0].initiator == "user"
+            ' "${RUNNER_TEMP}/attestations.json" >/dev/null; then
+              attestation_found=true
+              break
             fi
             sleep 5
           done
-          echo "published release did not become immutable" >&2
-          exit 1
+          test "$attestation_found" = true
+          tag="v${VERSION}"
+          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq '.isDraft')" = true
+          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq '.targetCommitish')" = "$SOURCE_COMMIT"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "tag appeared after preflight; ${tag} is burned" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${tag}" -f sha="$SOURCE_COMMIT" >/dev/null
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          test "$(git rev-list -n 1 "$tag")" = "$SOURCE_COMMIT"
+          gh release edit "$tag" --draft=false --latest=false
+          immutable=false
+          for _ in 1 2 3 4 5 6; do
+            if test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.immutable')" = true; then
+              immutable=true
+              break
+            fi
+            sleep 5
+          done
+          test "$immutable" = true
+          test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = false
+          readback="$(mktemp -d)"
+          gh release download "$tag" --dir "$readback"
+          test "$(find "$readback" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find "$readback" -mindepth 1 -maxdepth 1 | wc -l)" -eq 3
+          test "$(sha256sum "$readback/$PACKAGE_NAME" | cut -d' ' -f1)" = "$PACKAGE_SHA256"
+          test "$(sha256sum "$readback/SHA256SUMS" | cut -d' ' -f1)" = "$CHECKSUMS_SHA256"
+          test "$(sha256sum "$readback/release-manifest.json" | cut -d' ' -f1)" = "$RELEASE_MANIFEST_SHA256"
