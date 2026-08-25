@@ -27,6 +27,10 @@ on:
         description: Exact approved release-manifest.json SHA-256
         required: true
         type: string
+      immutable_releases_verified:
+        description: Release approver verified enabled=true and enforced_by_owner=true via the admin API
+        required: true
+        type: boolean
 
 permissions: {}
 
@@ -44,6 +48,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require authorized immutable-release preflight
+        env:
+          IMMUTABLE_RELEASES_VERIFIED: ${{ inputs.immutable_releases_verified }}
+        run: |
+          test "$IMMUTABLE_RELEASES_VERIFIED" = true
       - name: Verify dispatch and candidate build identity
         env:
           GH_TOKEN: ${{ github.token }}
