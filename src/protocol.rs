@@ -67,7 +67,22 @@ pub struct Handshake {
     pub server_capabilities: u32,
     pub character_set: u8,
     pub auth_data: Vec<u8>,
-    pub auth_plugin: String,
+    pub auth_plugin: AuthPlugin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPlugin {
+    CachingSha2Password,
+    MysqlNativePassword,
+}
+
+impl AuthPlugin {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CachingSha2Password => "caching_sha2_password",
+            Self::MysqlNativePassword => "mysql_native_password",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,9 +261,11 @@ pub fn parse_handshake(payload: &[u8]) -> Result<Handshake, CodecError> {
     if auth_data.len() != 20 {
         return Err(CodecError::Protocol);
     }
-    let auth_plugin = std::str::from_utf8(plugin_bytes)
-        .map_err(|_| CodecError::Encoding)?
-        .to_owned();
+    let auth_plugin = match std::str::from_utf8(plugin_bytes).map_err(|_| CodecError::Encoding)? {
+        "caching_sha2_password" => AuthPlugin::CachingSha2Password,
+        "mysql_native_password" => AuthPlugin::MysqlNativePassword,
+        _ => return Err(CodecError::Unsupported),
+    };
     Ok(Handshake {
         server_capabilities: capabilities,
         character_set,
@@ -272,8 +289,12 @@ pub fn handshake_response(
     username: &[u8],
     token: &[u8],
     database: Option<&str>,
+    auth_plugin: AuthPlugin,
 ) -> Result<Vec<u8>, CodecError> {
-    if username.contains(&0) || token.len() > usize::from(u8::MAX) {
+    if username.contains(&0)
+        || database.is_some_and(|value| value.as_bytes().contains(&0))
+        || token.len() > usize::from(u8::MAX)
+    {
         return Err(CodecError::Encoding);
     }
     let capacity = 64_usize
@@ -298,7 +319,8 @@ pub fn handshake_response(
         output.push(0);
     }
     if capabilities & 0x0008_0000 != 0 {
-        output.extend_from_slice(b"caching_sha2_password\0");
+        output.extend_from_slice(auth_plugin.name().as_bytes());
+        output.push(0);
     }
     Ok(output)
 }
@@ -483,13 +505,18 @@ pub fn parse_ok_or_error(
 pub fn parse_auth_response(
     payload: &[u8],
     secrets: &[(&str, &[u8])],
+    auth_plugin: AuthPlugin,
 ) -> Result<AuthResponse, CodecError> {
     match payload {
         [0x00, ..] => parse_ok_affected_rows(payload).map(|_affected_rows| AuthResponse::Complete),
         [0xff, ..] => Err(parse_server_error(payload, secrets, true)?),
-        [0x01, 0x03] => Ok(AuthResponse::FastComplete),
-        [0x01, 0x04] => Ok(AuthResponse::FullAuthentication),
-        [0xfe, ..] => Err(CodecError::Unsupported),
+        [0x01, 0x03] if auth_plugin == AuthPlugin::CachingSha2Password => {
+            Ok(AuthResponse::FastComplete)
+        }
+        [0x01, 0x04] if auth_plugin == AuthPlugin::CachingSha2Password => {
+            Ok(AuthResponse::FullAuthentication)
+        }
+        [0x01 | 0xfe, ..] => Err(CodecError::Unsupported),
         _ => Err(CodecError::Protocol),
     }
 }
@@ -711,6 +738,21 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn singlestore_0_2_35_greeting() -> Vec<u8> {
+        let mut packet = vec![10];
+        packet.extend_from_slice(b"5.7.32\0");
+        packet.extend_from_slice(&11_u32.to_le_bytes());
+        packet.extend_from_slice(b"gve'V,rQ\0");
+        packet.extend_from_slice(&0xf7df_u16.to_le_bytes());
+        packet.push(33);
+        packet.extend_from_slice(&2_u16.to_le_bytes());
+        packet.extend_from_slice(&0x801f_u16.to_le_bytes());
+        packet.push(21);
+        packet.extend_from_slice(&[0; 10]);
+        packet.extend_from_slice(b"\"{v/;mYHB8.;\0mysql_native_password\0");
+        packet
+    }
+
     fn lenenc(value: &[u8]) -> Vec<u8> {
         let mut result = vec![u8::try_from(value.len()).expect("small fixture")];
         result.extend_from_slice(value);
@@ -724,6 +766,59 @@ mod tests {
         assert_eq!(
             packet_header(MAX_PACKET_PAYLOAD + 1, 0),
             Err(CodecError::Limit)
+        );
+    }
+
+    #[test]
+    fn exact_singlestore_0_2_35_greeting_selects_native_password() {
+        let packet = singlestore_0_2_35_greeting();
+        assert_eq!(packet.len(), 74);
+        assert_eq!(
+            parse_handshake(&packet),
+            Ok(Handshake {
+                server_capabilities: 0x801f_f7df,
+                character_set: 33,
+                auth_data: b"gve'V,rQ\"{v/;mYHB8.;".to_vec(),
+                auth_plugin: AuthPlugin::MysqlNativePassword,
+            })
+        );
+    }
+
+    #[test]
+    fn handshake_response_names_the_selected_plugin_exactly() {
+        let capabilities = 0x0008_8a08;
+        let native = handshake_response(
+            capabilities,
+            33,
+            b"root",
+            &[0x5a; 20],
+            Some("app"),
+            AuthPlugin::MysqlNativePassword,
+        )
+        .expect("native response");
+        assert!(native.ends_with(b"app\0mysql_native_password\0"));
+
+        let caching = handshake_response(
+            capabilities,
+            255,
+            b"root",
+            &[0xa5; 32],
+            Some("app"),
+            AuthPlugin::CachingSha2Password,
+        )
+        .expect("caching response");
+        assert!(caching.ends_with(b"app\0caching_sha2_password\0"));
+
+        assert_eq!(
+            handshake_response(
+                capabilities,
+                33,
+                b"root",
+                &[],
+                Some("bad\0db"),
+                AuthPlugin::MysqlNativePassword,
+            ),
+            Err(CodecError::Encoding)
         );
     }
 
@@ -836,32 +931,51 @@ mod tests {
     #[test]
     fn authentication_states_and_server_errors_are_closed_and_sanitized() {
         assert_eq!(
-            parse_auth_response(&[0x00, 0, 0, 0, 0, 0, 0], &[]),
+            parse_auth_response(
+                &[0x00, 0, 0, 0, 0, 0, 0],
+                &[],
+                AuthPlugin::MysqlNativePassword,
+            ),
             Ok(AuthResponse::Complete)
         );
-        assert_eq!(parse_auth_response(&[0x00], &[]), Err(CodecError::Protocol));
         assert_eq!(
-            parse_auth_response(&[0x01, 0x03], &[]),
+            parse_auth_response(&[0x00], &[], AuthPlugin::MysqlNativePassword),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            parse_auth_response(&[0x01, 0x03], &[], AuthPlugin::CachingSha2Password),
             Ok(AuthResponse::FastComplete)
         );
         assert_eq!(
-            parse_auth_response(&[0x01, 0x04], &[]),
+            parse_auth_response(&[0x01, 0x04], &[], AuthPlugin::CachingSha2Password),
             Ok(AuthResponse::FullAuthentication)
         );
         assert_eq!(
-            parse_auth_response(&[0xfe, 0], &[]),
+            parse_auth_response(&[0x01, 0x03], &[], AuthPlugin::MysqlNativePassword),
             Err(CodecError::Unsupported)
         );
         assert_eq!(
-            parse_auth_response(&[0x01, 0x05], &[]),
-            Err(CodecError::Protocol)
+            parse_auth_response(
+                b"\xfemysql_native_password\0hostile-switch",
+                &[],
+                AuthPlugin::MysqlNativePassword,
+            ),
+            Err(CodecError::Unsupported)
+        );
+        assert_eq!(
+            parse_auth_response(&[0x01, 0x05], &[], AuthPlugin::CachingSha2Password),
+            Err(CodecError::Unsupported)
         );
 
         let mut packet = vec![0xff, 0x15, 0x04, b'#'];
         packet.extend_from_slice(b"28000");
         packet.extend_from_slice(b"bad secret\n");
         assert_eq!(
-            parse_auth_response(&packet, &[("password", b"secret")]),
+            parse_auth_response(
+                &packet,
+                &[("password", b"secret")],
+                AuthPlugin::MysqlNativePassword,
+            ),
             Err(CodecError::Authentication(ServerError {
                 vendor_code: 1045,
                 sqlstate: Some("28000".to_owned()),
@@ -1082,7 +1196,8 @@ mod tests {
             let _ = parse_packet_header(&bytes);
             let _ = parse_handshake(&bytes);
             let _ = parse_ok_or_error(&bytes, &[], false);
-            let _ = parse_auth_response(&bytes, &[]);
+            let _ = parse_auth_response(&bytes, &[], AuthPlugin::CachingSha2Password);
+            let _ = parse_auth_response(&bytes, &[], AuthPlugin::MysqlNativePassword);
             let _ = parse_ok_affected_rows(&bytes);
             let _ = parse_column(&bytes);
             let _ = parse_row(&bytes, &[column(255)], MAX_CELL_PAYLOAD_BYTES);
@@ -1103,9 +1218,7 @@ mod tests {
             packet.extend_from_slice(&[0; 10]);
             packet.extend_from_slice(b"abcdefghijkl\0caching_sha2_password\0");
             let end = cut.min(packet.len().saturating_sub(1));
-            if let Ok(handshake) = parse_handshake(packet.get(..end).expect("prefix")) {
-                prop_assert_ne!(handshake.auth_plugin, "caching_sha2_password");
-            }
+            prop_assert!(parse_handshake(packet.get(..end).expect("prefix")).is_err());
         }
     }
 }

@@ -62,6 +62,20 @@ interface net {
     connect: func(endpoint: string) -> result<%stream, error>;
 }
 
+/// Read-only access to the frozen operator-selected TLS mode for a granted
+/// logical endpoint. This interface reveals no concrete route or authority.
+interface net-policy {
+    use net.{error};
+
+    enum tls-mode {
+        disabled,
+        direct,
+        upgrade,
+    }
+
+    get-tls-mode: func(endpoint: string) -> result<tls-mode, error>;
+}
+
 /// Bindgen-only world used by Sigil to implement every v1 host interface.
 world imports {
     import log;
@@ -69,4 +83,5 @@ world imports {
     import entropy;
     import secrets;
     import net;
+    import net-policy;
 }
