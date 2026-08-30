@@ -1,15 +1,20 @@
-package sigil:sql@0.1.0;
+package sigil:sql@0.2.0;
 
-/// Experimental common SQL driver surface. It grants no host authority.
+/// Experimental typed SQL driver surface. It grants no host authority.
 interface driver {
+    /// Caller input is a set of additional ceilings. A driver must combine
+    /// each present limit with every smaller fixed or operator-owned limit.
     record connect-options {
         endpoint: string,
         username-secret: string,
         password-secret: string,
         database: option<string>,
+        max-rows: option<u32>,
+        max-result-bytes: option<u64>,
     }
 
     enum error-class {
+        invalid,
         authentication,
         server,
         transport,
@@ -28,12 +33,45 @@ interface driver {
         message: string,
     }
 
-    variant cell {
+    /// The semantic value class for one ordered result column.
+    enum column-type {
         null,
-        text(string),
-        bytes(list<u8>),
+        signed,
+        unsigned,
+        floating,
+        decimal,
+        text,
+        bytes,
+        temporal,
     }
 
+    /// The source temporal class. Cell text remains byte-for-byte unchanged.
+    enum temporal-type {
+        date,
+        time,
+        time-with-time-zone,
+        datetime,
+        timestamp,
+        timestamp-with-time-zone,
+        interval,
+        year,
+        vendor,
+    }
+
+    /// A tagged SQL value. `null` has no payload. `decimal` and `temporal`
+    /// carry their exact UTF-8 wire lexemes and are never normalized.
+    variant cell {
+        null,
+        signed(s64),
+        unsigned(u64),
+        floating(f64),
+        decimal(string),
+        text(string),
+        bytes(list<u8>),
+        temporal(string),
+    }
+
+    /// Ordered metadata for one positional cell in every returned row.
     record column {
         catalog: string,
         schema: string,
@@ -45,6 +83,8 @@ interface driver {
         charset: u32,
         collation: u32,
         %flags: u32,
+        %type: column-type,
+        temporal-type: option<temporal-type>,
     }
 
     record row {
@@ -56,19 +96,30 @@ interface driver {
         rows: list<row>,
     }
 
+    /// Command metadata reported by the server protocol.
     record command-result {
         affected-rows: u64,
+        last-insert-id: option<u64>,
+        warnings: u32,
     }
 
-    variant query-result {
-        rows(row-set),
-        command(command-result),
-    }
-
+    /// One resource is one server session until close or terminal failure.
     resource connection {
-        query: func(sql: string) -> result<query-result, error>;
+        /// Execute one statement that returns exactly one row set.
+        query: func(sql: string) -> result<row-set, error>;
+
+        /// Execute one statement that returns exactly one command result.
+        exec: func(sql: string) -> result<command-result, error>;
+
+        /// Close the session. Repeated calls have no effect.
         close: func();
     }
 
     connect: func(options: connect-options) -> result<connection, error>;
+}
+
+/// Binding-only world. Plugin manifests still select the nominal `driver`
+/// interface as their entrypoint.
+world bindings {
+    export driver;
 }

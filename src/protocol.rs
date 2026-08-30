@@ -617,6 +617,7 @@ pub fn parse_ok_packet(payload: &[u8]) -> Result<CommandMetadata, CodecError> {
     })
 }
 
+#[cfg(test)]
 fn parse_ok_affected_rows(payload: &[u8]) -> Result<u64, CodecError> {
     parse_ok_packet(payload).map(|metadata| metadata.affected_rows)
 }

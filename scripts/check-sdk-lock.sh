@@ -25,7 +25,7 @@ trap cleanup EXIT
 
 test "$(git -C "$checkout" rev-parse HEAD)" = "$commit"
 echo "$expected_host  $checkout/wit/sigil-host/1.0.0/host.wit" | sha256sum --check --strict
-echo "$expected_sql  $checkout/wit/sigil-sql/0.1.0/sql.wit" | sha256sum --check --strict
+echo "$expected_sql  $checkout/wit/sigil-sql/0.2.0/sql.wit" | sha256sum --check --strict
 cmp --silent "$checkout/wit/sigil-host/1.0.0/host.wit" wit/deps/sigil-host/host.wit
-cmp --silent "$checkout/wit/sigil-sql/0.1.0/sql.wit" wit/deps/sigil-sql/sql.wit
+cmp --silent "$checkout/wit/sigil-sql/0.2.0/sql.wit" wit/deps/sigil-sql/sql.wit
 echo "SDK revision and vendored WIT are exact"
