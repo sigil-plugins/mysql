@@ -1,0 +1,29 @@
+[deploy]
+backend = "external"
+
+[plugins]
+allow_third_party = true
+
+[plugins.trust]
+install_allowlist = ["github:conformance/mysql"]
+
+[plugins.trust.capability_allowlist]
+network = ["github:conformance/mysql"]
+secrets = ["github:conformance/mysql"]
+
+[plugins.require]
+mysql = { version = "=0.2.0", source = "github:conformance/mysql" }
+
+[plugins.grants.mysql]
+secrets = ["MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_BAD_PASSWORD"]
+
+[plugins.grants.mysql.network.database]
+target = "database:3306"
+tls = "disabled"
+connect_timeout = "5s"
+io_timeout = "5s"
+max_connections = 1
+max_bytes = "32MiB"
+
+[plugins.runtime]
+max_call_seconds = 10

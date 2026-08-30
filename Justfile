@@ -32,3 +32,6 @@ reproducible:
 
 sigil-check: check
     ./scripts/check-sigil-compatibility.sh "{{sigil}}" "{{sigil_checkout}}"
+
+live-acceptance: dist
+    ./scripts/check-live-acceptance.sh "{{sigil}}" "{{sigil_checkout}}"

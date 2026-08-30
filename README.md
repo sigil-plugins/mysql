@@ -62,6 +62,10 @@ revision recorded in `SDK.lock`. `just reproducible` performs two isolated
 builds and compares both the component and canonical package bytes.
 `just sigil-check` loads the packed component through Sigil's production store
 and Lua bridge, then drives it against a deterministic MySQL protocol peer.
+`just live-acceptance` runs the same production path against pinned
+SingleStoreDB Dev and stock MySQL 8 images, plus hostile protocol peers; see
+[`conformance/live/README.md`](conformance/live/README.md) for its prerequisites,
+exact identities, matrix, and evidence layout.
 
 Version 0.1.2 is the first keyless-provenance release. The unprivileged
 `prepare-release` workflow builds its package and canonical release manifest
