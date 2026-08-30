@@ -5,6 +5,7 @@ python := env_var_or_default("PYTHON", "python3")
 
 build:
     root="$(pwd -P)"; cargo_home="${CARGO_HOME:-$HOME/.cargo}"; rustflags="${RUSTFLAGS:-} --remap-path-prefix=${root}=/workspace --remap-path-prefix=${cargo_home}=/cargo"; RUSTFLAGS="${rustflags# }" cargo build --release --target wasm32-unknown-unknown --locked
+    {{python}} scripts/check-release-zeroize.py target/wasm32-unknown-unknown/release/sigil_plugin_mysql.wasm
     {{wasm_tools}} component new target/wasm32-unknown-unknown/release/sigil_plugin_mysql.wasm -o plugin.wasm
     {{wasm_tools}} validate --features all plugin.wasm
     {{wasm_tools}} component targets wit --world sigil:mysql/mysql@0.1.0 plugin.wasm
