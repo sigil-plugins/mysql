@@ -25,6 +25,10 @@ The script rejects changed candidate digests before starting either service.
 It runs SingleStore with four CPUs because that image's free license rejects a
 larger visible CPU count.
 
+`just signal-cleanup-check` exercises the shared trap dispatcher in isolated
+subprocesses. It proves ordinary exit status preservation, distinct 130/143
+statuses for INT/TERM, exactly one cleanup call, and managed-resource absence.
+
 ## Run
 
 Prerequisites are the normal build toolchain, Python 3.11 or newer, a
@@ -81,8 +85,9 @@ assertion, never partial row output.
 Each run writes ignored evidence under `target/live-acceptance/run.*`, including
 image pull identities, raw handshake probes, auth-plugin evidence, JSON
 reports, hostile-peer traces, service logs, candidate identities, elapsed
-times, container and volume inventories before and after teardown, and
-`teardown.txt`. A successful teardown file ends with:
+times, the one-line `cleanup-count.txt`, container and volume inventories
+before and after teardown, and `teardown.txt`. A successful teardown file ends
+with:
 
 ```text
 all live acceptance containers and volumes removed

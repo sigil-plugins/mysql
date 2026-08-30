@@ -15,7 +15,10 @@ build:
 sdk-drift:
     ./scripts/check-sdk-lock.sh
 
-check: sdk-drift
+signal-cleanup-check:
+    ./scripts/check-live-cleanup-signals.sh
+
+check: sdk-drift signal-cleanup-check
     cargo fmt --all -- --check
     cargo test --locked
     cargo clippy --all-targets --locked -- -D warnings

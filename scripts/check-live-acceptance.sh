@@ -8,6 +8,7 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly ROOT
+source "$ROOT/scripts/live-cleanup-trap.sh"
 SIGIL="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
 readonly SIGIL
 SIGIL_CHECKOUT="${2:-${SIGIL_CHECKOUT:-}}"
@@ -111,10 +112,12 @@ PY
   done <"$volumes_file"
 }
 
-cleanup() {
-  local status=$?
+cleanup_live_resources() {
+  local status=$1
+  local cleanup_failed=0
   local name volume
   set +e
+  printf '%s\n' "$status" >>"$EVIDENCE/cleanup-count.txt"
   : >"$EVIDENCE/teardown.txt"
   for pid in "${peer_pids[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
@@ -130,7 +133,7 @@ cleanup() {
         >>"$EVIDENCE/teardown.txt" 2>&1; then
         echo "failed to inventory live acceptance container: $name" \
           >>"$EVIDENCE/teardown.txt"
-        status=1
+        cleanup_failed=1
       fi
     else
       echo "$name absent" >>"$EVIDENCE/managed-containers.before-cleanup.txt"
@@ -156,7 +159,7 @@ cleanup() {
       echo "$name present" >>"$EVIDENCE/managed-containers.after.txt"
       echo "live acceptance container remains after teardown: $name" \
         >>"$EVIDENCE/teardown.txt"
-      status=1
+      cleanup_failed=1
     else
       echo "$name absent" >>"$EVIDENCE/managed-containers.after.txt"
     fi
@@ -172,16 +175,18 @@ cleanup() {
       echo "$volume present" >>"$EVIDENCE/managed-volumes.after.txt"
       echo "live acceptance volume remains after teardown: $volume" \
         >>"$EVIDENCE/teardown.txt"
-      status=1
+      cleanup_failed=1
     else
       echo "$volume absent" >>"$EVIDENCE/managed-volumes.after.txt"
     fi
   done
   "$ENGINE" volume ls --format '{{.Name}}' | sort \
     >"$EVIDENCE/engine-volumes.after.txt"
-  if [[ "$status" -eq 0 ]]; then
+  if [[ "$cleanup_failed" -eq 0 ]]; then
     echo "all live acceptance containers and volumes removed" \
       >>"$EVIDENCE/teardown.txt"
+  elif [[ "$status" -eq 0 ]]; then
+    status=1
   fi
   if [[ "${KEEP_LIVE_SCRATCH:-0}" == 1 ]]; then
     printf 'scratch retained: %s\n' "$SCRATCH" >&2
@@ -189,9 +194,9 @@ cleanup() {
     rm -r -- "$SCRATCH"
   fi
   printf 'evidence: %s\n' "$EVIDENCE" >&2
-  exit "$status"
+  return "$status"
 }
-trap cleanup EXIT INT TERM
+sigil_install_cleanup_traps cleanup_live_resources
 
 "$ENGINE" volume ls --format '{{.Name}}' | sort \
   >"$EVIDENCE/engine-volumes.before.txt"
