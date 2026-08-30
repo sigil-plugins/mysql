@@ -3,7 +3,8 @@ set -euo pipefail
 
 root="$(pwd -P)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-version="$(python3 -c 'import tomllib; print(tomllib.load(open("plugin.toml", "rb"))["version"])')"
+python="${PYTHON:-python3}"
+version="$("$python" -c 'import tomllib; print(tomllib.load(open("plugin.toml", "rb"))["version"])')"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "plugin.toml version is not canonical SemVer" >&2
   exit 1
@@ -21,6 +22,8 @@ trap cleanup EXIT
 for run in one two; do
   CARGO_TARGET_DIR="$temporary/target-$run" RUSTFLAGS="$rustflags" \
     cargo build --release --target wasm32-unknown-unknown --locked
+  "$python" scripts/check-release-zeroize.py \
+    "$temporary/target-$run/wasm32-unknown-unknown/release/sigil_plugin_mysql.wasm"
   wasm-tools component new \
     "$temporary/target-$run/wasm32-unknown-unknown/release/sigil_plugin_mysql.wasm" \
     -o "$temporary/plugin-$run.wasm"
@@ -36,7 +39,7 @@ for run in one two; do
   mkdir "$temporary/source-$run"
   cp plugin.toml "$temporary/source-$run/plugin.toml"
   cp "$temporary/plugin-$run.wasm" "$temporary/source-$run/plugin.wasm"
-  python3 scripts/pack.py \
+  "$python" scripts/pack.py \
     "$temporary/source-$run/plugin.toml" \
     "$temporary/dist-$run" >/dev/null
 done

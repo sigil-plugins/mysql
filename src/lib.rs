@@ -4,6 +4,7 @@ use std::cell::RefCell;
 
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 #[allow(unsafe_code, clippy::all, clippy::nursery, clippy::pedantic)]
 mod bindings {
@@ -181,9 +182,9 @@ fn caching_sha2_token(password: &[u8], nonce: &[u8]) -> Vec<u8> {
         .zip(stage3.iter())
         .map(|(left, right)| left ^ right)
         .collect();
-    stage1.fill(0);
-    stage2.fill(0);
-    stage3.fill(0);
+    stage1.as_mut_slice().zeroize();
+    stage2.as_mut_slice().zeroize();
+    stage3.as_mut_slice().zeroize();
     token
 }
 
@@ -206,9 +207,9 @@ fn mysql_native_password_token(password: &[u8], nonce: &[u8]) -> Vec<u8> {
         .zip(stage3.iter())
         .map(|(left, right)| left ^ right)
         .collect();
-    stage1.fill(0);
-    stage2.fill(0);
-    stage3.fill(0);
+    stage1.as_mut_slice().zeroize();
+    stage2.as_mut_slice().zeroize();
+    stage3.as_mut_slice().zeroize();
     token
 }
 

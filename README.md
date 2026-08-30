@@ -23,6 +23,10 @@ never downgrade an operator-required TLS upgrade. Disabled mode provides no
 transport confidentiality and is appropriate only for Sigil's explicitly
 permitted deploy-local routes.
 
+Password-derived SHA-1 and SHA-256 digest intermediates use optimizer-resistant
+zeroization. The release gate inspects the optimized core Wasm and requires all
+six fixed-size wipes to remain reachable from the exported `connect` path.
+
 The v0.1 driver deliberately does not implement prepared statements, binary
 protocol, multi-statements/results, `LOCAL INFILE`, retry, or reconnect.
 
