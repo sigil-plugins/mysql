@@ -99,6 +99,39 @@ pub enum RawCell {
     Bytes(Vec<u8>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedColumnType {
+    Null,
+    Signed,
+    Unsigned,
+    Floating,
+    Decimal,
+    Text,
+    Bytes,
+    Temporal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedTemporalType {
+    Date,
+    Time,
+    Datetime,
+    Timestamp,
+    Year,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedCell {
+    Null,
+    Signed(i64),
+    Unsigned(u64),
+    Floating(f64),
+    Decimal(String),
+    Text(String),
+    Bytes(Vec<u8>),
+    Temporal(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawColumn {
     pub catalog: String,
@@ -114,6 +147,48 @@ pub struct RawColumn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedColumn {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub original_table: String,
+    pub name: String,
+    pub original_name: String,
+    pub vendor_type: u8,
+    pub charset: u16,
+    pub collation: u16,
+    pub flags: u16,
+    pub column_type: TypedColumnType,
+    pub temporal_type: Option<TypedTemporalType>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedRowSet {
+    pub columns: Vec<TypedColumn>,
+    pub rows: Vec<Vec<TypedCell>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandMetadata {
+    pub affected_rows: u64,
+    pub last_insert_id: Option<u64>,
+    pub warnings: u16,
+    pub status_flags: u16,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypedResultLimits {
+    pub max_rows: Option<u32>,
+    pub max_result_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedQueryResult {
+    Rows(TypedRowSet),
+    Command(CommandMetadata),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawQueryResult {
     Rows {
         columns: Vec<RawColumn>,
@@ -121,6 +196,9 @@ pub enum RawQueryResult {
     },
     Command {
         affected_rows: u64,
+        last_insert_id: Option<u64>,
+        warnings: u16,
+        status_flags: u16,
     },
 }
 
@@ -496,7 +574,7 @@ pub fn parse_ok_or_error(
     authentication: bool,
 ) -> Result<(), CodecError> {
     match payload.first().copied() {
-        Some(0x00) => parse_ok_affected_rows(payload).map(|_affected_rows| ()),
+        Some(0x00) => parse_ok_packet(payload).map(|_metadata| ()),
         Some(0xff) => Err(parse_server_error(payload, secrets, authentication)?),
         _ => Err(CodecError::Protocol),
     }
@@ -508,7 +586,7 @@ pub fn parse_auth_response(
     auth_plugin: AuthPlugin,
 ) -> Result<AuthResponse, CodecError> {
     match payload {
-        [0x00, ..] => parse_ok_affected_rows(payload).map(|_affected_rows| AuthResponse::Complete),
+        [0x00, ..] => parse_ok_packet(payload).map(|_metadata| AuthResponse::Complete),
         [0xff, ..] => Err(parse_server_error(payload, secrets, true)?),
         [0x01, 0x03] if auth_plugin == AuthPlugin::CachingSha2Password => {
             Ok(AuthResponse::FastComplete)
@@ -521,17 +599,26 @@ pub fn parse_auth_response(
     }
 }
 
-fn parse_ok_affected_rows(payload: &[u8]) -> Result<u64, CodecError> {
+pub fn parse_ok_packet(payload: &[u8]) -> Result<CommandMetadata, CodecError> {
     let mut cursor = Cursor::new(payload);
     if cursor.u8()? != 0x00 {
         return Err(CodecError::Protocol);
     }
     let affected_rows = cursor.lenenc()?.ok_or(CodecError::Protocol)?;
-    cursor.lenenc()?.ok_or(CodecError::Protocol)?;
-    let status = cursor.u16_le()?;
-    cursor.u16_le()?;
-    reject_more_results(status)?;
-    Ok(affected_rows)
+    let last_insert_id = cursor.lenenc()?.ok_or(CodecError::Protocol)?;
+    let status_flags = cursor.u16_le()?;
+    let warnings = cursor.u16_le()?;
+    reject_more_results(status_flags)?;
+    Ok(CommandMetadata {
+        affected_rows,
+        last_insert_id: Some(last_insert_id),
+        warnings,
+        status_flags,
+    })
+}
+
+fn parse_ok_affected_rows(payload: &[u8]) -> Result<u64, CodecError> {
+    parse_ok_packet(payload).map(|metadata| metadata.affected_rows)
 }
 
 fn parse_column(payload: &[u8]) -> Result<RawColumn, CodecError> {
@@ -599,14 +686,457 @@ pub const fn supported_utf8_collation(collation: u16) -> bool {
 }
 
 const BINARY_FLAG: u16 = 0x0080;
+pub const UNSIGNED_FLAG: u16 = 0x0020;
+
+const MYSQL_TYPE_DECIMAL: u8 = 0;
+const MYSQL_TYPE_TINY: u8 = 1;
+const MYSQL_TYPE_SHORT: u8 = 2;
+const MYSQL_TYPE_LONG: u8 = 3;
+const MYSQL_TYPE_FLOAT: u8 = 4;
+const MYSQL_TYPE_DOUBLE: u8 = 5;
+const MYSQL_TYPE_NULL: u8 = 6;
+const MYSQL_TYPE_TIMESTAMP: u8 = 7;
+const MYSQL_TYPE_LONGLONG: u8 = 8;
+const MYSQL_TYPE_INT24: u8 = 9;
+const MYSQL_TYPE_DATE: u8 = 10;
+const MYSQL_TYPE_TIME: u8 = 11;
+const MYSQL_TYPE_DATETIME: u8 = 12;
+const MYSQL_TYPE_YEAR: u8 = 13;
+const MYSQL_TYPE_VARCHAR: u8 = 15;
+const MYSQL_TYPE_BIT: u8 = 16;
+const MYSQL_TYPE_TIMESTAMP2: u8 = 17;
+const MYSQL_TYPE_DATETIME2: u8 = 18;
+const MYSQL_TYPE_TIME2: u8 = 19;
+const MYSQL_TYPE_TYPED_ARRAY: u8 = 20;
+const MYSQL_TYPE_VECTOR: u8 = 242;
+const MYSQL_TYPE_INVALID: u8 = 243;
+const MYSQL_TYPE_BOOL: u8 = 244;
+const MYSQL_TYPE_JSON: u8 = 245;
+const MYSQL_TYPE_NEWDECIMAL: u8 = 246;
+const MYSQL_TYPE_ENUM: u8 = 247;
+const MYSQL_TYPE_SET: u8 = 248;
+const MYSQL_TYPE_TINY_BLOB: u8 = 249;
+const MYSQL_TYPE_MEDIUM_BLOB: u8 = 250;
+const MYSQL_TYPE_LONG_BLOB: u8 = 251;
+const MYSQL_TYPE_BLOB: u8 = 252;
+const MYSQL_TYPE_VAR_STRING: u8 = 253;
+const MYSQL_TYPE_STRING: u8 = 254;
+const MYSQL_TYPE_GEOMETRY: u8 = 255;
+
+const MAX_TYPED_RESULT_BYTES: u64 = (MAX_METADATA_BYTES as u64) + (MAX_CELL_PAYLOAD_BYTES as u64);
 
 const fn column_is_text(column: &RawColumn) -> Result<bool, CodecError> {
-    if column.collation == 0 || column.collation > 323 {
+    if column.charset != column.collation || column.collation == 0 || column.collation > 323 {
         return Err(CodecError::Protocol);
     }
     Ok(column.flags & BINARY_FLAG == 0
         && column.collation != 63
         && supported_utf8_collation(column.collation))
+}
+
+pub fn classify_typed_column(
+    column: &RawColumn,
+) -> Result<(TypedColumnType, Option<TypedTemporalType>), CodecError> {
+    let integer = || {
+        if column.flags & UNSIGNED_FLAG == 0 {
+            TypedColumnType::Signed
+        } else {
+            TypedColumnType::Unsigned
+        }
+    };
+    let string = || {
+        column_is_text(column).map(|is_text| {
+            if is_text {
+                TypedColumnType::Text
+            } else {
+                TypedColumnType::Bytes
+            }
+        })
+    };
+
+    match column.vendor_type {
+        MYSQL_TYPE_INVALID => Err(CodecError::Protocol),
+        MYSQL_TYPE_TYPED_ARRAY | MYSQL_TYPE_VECTOR | MYSQL_TYPE_BOOL | 14 | 21..=241 => {
+            Err(CodecError::Unsupported)
+        }
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Decimal, None))
+        }
+        MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_LONG | MYSQL_TYPE_LONGLONG
+        | MYSQL_TYPE_INT24 => {
+            column_is_text(column)?;
+            Ok((integer(), None))
+        }
+        MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Floating, None))
+        }
+        MYSQL_TYPE_NULL => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Null, None))
+        }
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => {
+            column_is_text(column)?;
+            Ok((
+                TypedColumnType::Temporal,
+                Some(TypedTemporalType::Timestamp),
+            ))
+        }
+        MYSQL_TYPE_DATE => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Temporal, Some(TypedTemporalType::Date)))
+        }
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Temporal, Some(TypedTemporalType::Time)))
+        }
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Temporal, Some(TypedTemporalType::Datetime)))
+        }
+        MYSQL_TYPE_YEAR => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Temporal, Some(TypedTemporalType::Year)))
+        }
+        MYSQL_TYPE_JSON => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Text, None))
+        }
+        MYSQL_TYPE_VARCHAR
+        | MYSQL_TYPE_ENUM
+        | MYSQL_TYPE_SET
+        | MYSQL_TYPE_TINY_BLOB
+        | MYSQL_TYPE_MEDIUM_BLOB
+        | MYSQL_TYPE_LONG_BLOB
+        | MYSQL_TYPE_BLOB
+        | MYSQL_TYPE_VAR_STRING
+        | MYSQL_TYPE_STRING => Ok((string()?, None)),
+        MYSQL_TYPE_BIT | MYSQL_TYPE_GEOMETRY => {
+            column_is_text(column)?;
+            Ok((TypedColumnType::Bytes, None))
+        }
+    }
+}
+
+fn raw_cell_bytes(cell: &RawCell) -> Option<&[u8]> {
+    match cell {
+        RawCell::Null => None,
+        RawCell::Text(value) => Some(value.as_bytes()),
+        RawCell::Bytes(value) => Some(value),
+    }
+}
+
+fn integer_grammar(bytes: &[u8], negative_allowed: bool) -> bool {
+    let Some((&first, rest)) = bytes.split_first() else {
+        return false;
+    };
+    let digits = match first {
+        b'+' => rest,
+        b'-' if negative_allowed => rest,
+        b'0'..=b'9' => bytes,
+        _ => return false,
+    };
+    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+}
+
+fn finite_number_grammar(bytes: &[u8]) -> bool {
+    let bytes = match bytes.first() {
+        Some(b'+' | b'-') => &bytes[1..],
+        _ => bytes,
+    };
+    if bytes.is_empty() {
+        return false;
+    }
+
+    let exponent = bytes.iter().position(|byte| matches!(byte, b'e' | b'E'));
+    let (mantissa, exponent) = exponent.map_or((bytes, None), |index| {
+        (&bytes[..index], Some(&bytes[index + 1..]))
+    });
+    if let Some(exponent) = exponent {
+        let digits = match exponent.first() {
+            Some(b'+' | b'-') => &exponent[1..],
+            _ => exponent,
+        };
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return false;
+        }
+    }
+    if mantissa.iter().any(|byte| matches!(byte, b'e' | b'E')) {
+        return false;
+    }
+
+    let mut decimal_points = 0_u8;
+    let mut digits = 0_usize;
+    for byte in mantissa {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' => decimal_points = decimal_points.saturating_add(1),
+            _ => return false,
+        }
+    }
+    digits != 0 && decimal_points <= 1
+}
+
+fn mantissa_has_nonzero_digit(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .take_while(|byte| !matches!(byte, b'e' | b'E'))
+        .any(|byte| matches!(byte, b'1'..=b'9'))
+}
+
+fn parse_signed(column: &RawColumn, bytes: &[u8]) -> Result<i64, CodecError> {
+    if !integer_grammar(bytes, true) {
+        return Err(CodecError::Encoding);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| CodecError::Encoding)?;
+    let value = text.parse::<i64>().map_err(|_| CodecError::Unsupported)?;
+    let (minimum, maximum) = match column.vendor_type {
+        MYSQL_TYPE_TINY => (i64::from(i8::MIN), i64::from(i8::MAX)),
+        MYSQL_TYPE_SHORT => (i64::from(i16::MIN), i64::from(i16::MAX)),
+        MYSQL_TYPE_LONG => (i64::from(i32::MIN), i64::from(i32::MAX)),
+        MYSQL_TYPE_INT24 => (-8_388_608, 8_388_607),
+        MYSQL_TYPE_LONGLONG => (i64::MIN, i64::MAX),
+        _ => return Err(CodecError::Protocol),
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(CodecError::Protocol);
+    }
+    Ok(value)
+}
+
+fn parse_unsigned(column: &RawColumn, bytes: &[u8]) -> Result<u64, CodecError> {
+    if !integer_grammar(bytes, false) {
+        return Err(CodecError::Encoding);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| CodecError::Encoding)?;
+    let value = text.parse::<u64>().map_err(|_| CodecError::Unsupported)?;
+    let maximum = match column.vendor_type {
+        MYSQL_TYPE_TINY => u64::from(u8::MAX),
+        MYSQL_TYPE_SHORT => u64::from(u16::MAX),
+        MYSQL_TYPE_LONG => u64::from(u32::MAX),
+        MYSQL_TYPE_INT24 => 16_777_215,
+        MYSQL_TYPE_LONGLONG => u64::MAX,
+        _ => return Err(CodecError::Protocol),
+    };
+    if value > maximum {
+        return Err(CodecError::Protocol);
+    }
+    Ok(value)
+}
+
+fn special_float(bytes: &[u8]) -> Option<f64> {
+    if bytes.eq_ignore_ascii_case(b"nan") || bytes.eq_ignore_ascii_case(b"+nan") {
+        Some(f64::NAN)
+    } else if bytes.eq_ignore_ascii_case(b"-nan") {
+        Some(-f64::NAN)
+    } else if bytes.eq_ignore_ascii_case(b"inf")
+        || bytes.eq_ignore_ascii_case(b"+inf")
+        || bytes.eq_ignore_ascii_case(b"infinity")
+        || bytes.eq_ignore_ascii_case(b"+infinity")
+    {
+        Some(f64::INFINITY)
+    } else if bytes.eq_ignore_ascii_case(b"-inf") || bytes.eq_ignore_ascii_case(b"-infinity") {
+        Some(f64::NEG_INFINITY)
+    } else {
+        None
+    }
+}
+
+fn parse_floating(column: &RawColumn, bytes: &[u8]) -> Result<f64, CodecError> {
+    if let Some(value) = special_float(bytes) {
+        return Ok(value);
+    }
+    if !finite_number_grammar(bytes) {
+        return Err(CodecError::Encoding);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| CodecError::Encoding)?;
+    let value = match column.vendor_type {
+        MYSQL_TYPE_FLOAT => f64::from(text.parse::<f32>().map_err(|_| CodecError::Unsupported)?),
+        MYSQL_TYPE_DOUBLE => text.parse::<f64>().map_err(|_| CodecError::Unsupported)?,
+        _ => return Err(CodecError::Protocol),
+    };
+    if !value.is_finite() || (value == 0.0 && mantissa_has_nonzero_digit(bytes)) {
+        return Err(CodecError::Unsupported);
+    }
+    Ok(value)
+}
+
+fn validate_typed_cell(
+    column: &RawColumn,
+    column_type: TypedColumnType,
+    cell: &RawCell,
+) -> Result<u64, CodecError> {
+    let Some(bytes) = raw_cell_bytes(cell) else {
+        return Ok(0);
+    };
+    match column_type {
+        TypedColumnType::Null => Err(CodecError::Protocol),
+        TypedColumnType::Signed => parse_signed(column, bytes).map(|_| 8),
+        TypedColumnType::Unsigned => parse_unsigned(column, bytes).map(|_| 8),
+        TypedColumnType::Floating => parse_floating(column, bytes).map(|_| 8),
+        TypedColumnType::Decimal => {
+            if !bytes.is_ascii() || !finite_number_grammar(bytes) {
+                return Err(CodecError::Encoding);
+            }
+            Ok(bytes.len() as u64)
+        }
+        TypedColumnType::Text | TypedColumnType::Temporal => {
+            let value = std::str::from_utf8(bytes).map_err(|_| CodecError::Encoding)?;
+            if column_type == TypedColumnType::Temporal && value.is_empty() {
+                return Err(CodecError::Encoding);
+            }
+            Ok(bytes.len() as u64)
+        }
+        TypedColumnType::Bytes => Ok(bytes.len() as u64),
+    }
+}
+
+fn decode_typed_cell(
+    column: &RawColumn,
+    column_type: TypedColumnType,
+    cell: RawCell,
+) -> Result<TypedCell, CodecError> {
+    validate_typed_cell(column, column_type, &cell)?;
+    let bytes = match cell {
+        RawCell::Null => return Ok(TypedCell::Null),
+        RawCell::Text(value) => value.into_bytes(),
+        RawCell::Bytes(value) => value,
+    };
+    match column_type {
+        TypedColumnType::Null => Err(CodecError::Protocol),
+        TypedColumnType::Signed => parse_signed(column, &bytes).map(TypedCell::Signed),
+        TypedColumnType::Unsigned => parse_unsigned(column, &bytes).map(TypedCell::Unsigned),
+        TypedColumnType::Floating => parse_floating(column, &bytes).map(TypedCell::Floating),
+        TypedColumnType::Decimal => String::from_utf8(bytes)
+            .map(TypedCell::Decimal)
+            .map_err(|_| CodecError::Encoding),
+        TypedColumnType::Text => String::from_utf8(bytes)
+            .map(TypedCell::Text)
+            .map_err(|_| CodecError::Encoding),
+        TypedColumnType::Bytes => Ok(TypedCell::Bytes(bytes)),
+        TypedColumnType::Temporal => String::from_utf8(bytes)
+            .map(TypedCell::Temporal)
+            .map_err(|_| CodecError::Encoding),
+    }
+}
+
+fn metadata_logical_bytes(column: &RawColumn) -> Result<u64, CodecError> {
+    [
+        column.catalog.len(),
+        column.schema.len(),
+        column.table.len(),
+        column.original_table.len(),
+        column.name.len(),
+        column.original_name.len(),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, length| {
+        total.checked_add(length as u64).ok_or(CodecError::Limit)
+    })
+}
+
+fn result_byte_ceiling(limits: TypedResultLimits) -> u64 {
+    limits
+        .max_result_bytes
+        .map_or(MAX_TYPED_RESULT_BYTES, |value| {
+            value.min(MAX_TYPED_RESULT_BYTES)
+        })
+}
+
+pub fn decode_typed_result(
+    result: RawQueryResult,
+    limits: TypedResultLimits,
+) -> Result<TypedQueryResult, CodecError> {
+    match result {
+        RawQueryResult::Command {
+            affected_rows,
+            last_insert_id,
+            warnings,
+            status_flags,
+        } => {
+            let logical_bytes = 12_u64
+                .checked_add(if last_insert_id.is_some() { 8 } else { 0 })
+                .ok_or(CodecError::Limit)?;
+            if logical_bytes > result_byte_ceiling(limits) {
+                return Err(CodecError::Limit);
+            }
+            Ok(TypedQueryResult::Command(CommandMetadata {
+                affected_rows,
+                last_insert_id,
+                warnings,
+                status_flags,
+            }))
+        }
+        RawQueryResult::Rows { columns, rows } => {
+            let row_ceiling = limits.max_rows.map_or(MAX_ROWS, |value| {
+                usize::try_from(value).unwrap_or(usize::MAX).min(MAX_ROWS)
+            });
+            if rows.len() > row_ceiling {
+                return Err(CodecError::Limit);
+            }
+
+            let classified: Vec<_> = columns
+                .iter()
+                .map(classify_typed_column)
+                .collect::<Result<_, _>>()?;
+            let mut logical_bytes = 0_u64;
+            for column in &columns {
+                logical_bytes = logical_bytes
+                    .checked_add(metadata_logical_bytes(column)?)
+                    .ok_or(CodecError::Limit)?;
+            }
+            for row in &rows {
+                if row.len() != columns.len() {
+                    return Err(CodecError::Protocol);
+                }
+                for ((column, cell), (column_type, _temporal_type)) in
+                    columns.iter().zip(row).zip(&classified)
+                {
+                    logical_bytes = logical_bytes
+                        .checked_add(validate_typed_cell(column, *column_type, cell)?)
+                        .ok_or(CodecError::Limit)?;
+                }
+            }
+            if logical_bytes > result_byte_ceiling(limits) {
+                return Err(CodecError::Limit);
+            }
+
+            let typed_columns: Vec<_> = columns
+                .iter()
+                .zip(&classified)
+                .map(|(column, (column_type, temporal_type))| TypedColumn {
+                    catalog: column.catalog.clone(),
+                    schema: column.schema.clone(),
+                    table: column.table.clone(),
+                    original_table: column.original_table.clone(),
+                    name: column.name.clone(),
+                    original_name: column.original_name.clone(),
+                    vendor_type: column.vendor_type,
+                    charset: column.charset,
+                    collation: column.collation,
+                    flags: column.flags,
+                    column_type: *column_type,
+                    temporal_type: *temporal_type,
+                })
+                .collect();
+            let typed_rows = rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .zip(columns.iter().zip(&classified))
+                        .map(|(cell, (column, (column_type, _temporal_type)))| {
+                            decode_typed_cell(column, *column_type, cell)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(TypedQueryResult::Rows(TypedRowSet {
+                columns: typed_columns,
+                rows: typed_rows,
+            }))
+        }
+    }
 }
 
 fn parse_row(
@@ -663,8 +1193,12 @@ pub fn read_query_result(
     let first = read(sequence).map_err(QueryError::Io)?;
     match first.first().copied() {
         Some(0x00) => {
+            let metadata = parse_ok_packet(&first)?;
             return Ok(RawQueryResult::Command {
-                affected_rows: parse_ok_affected_rows(&first)?,
+                affected_rows: metadata.affected_rows,
+                last_insert_id: metadata.last_insert_id,
+                warnings: metadata.warnings,
+                status_flags: metadata.status_flags,
             });
         }
         Some(0xff) => return Err(parse_server_error(&first, secrets, false)?.into()),
@@ -999,6 +1533,545 @@ mod tests {
         }
     }
 
+    fn typed_column(vendor_type: u8, flags: u16, collation: u16) -> RawColumn {
+        RawColumn {
+            catalog: String::new(),
+            schema: String::new(),
+            table: String::new(),
+            original_table: String::new(),
+            name: String::new(),
+            original_name: String::new(),
+            vendor_type,
+            charset: collation,
+            collation,
+            flags,
+        }
+    }
+
+    fn typed_cell(
+        column: RawColumn,
+        cell: RawCell,
+    ) -> Result<(TypedColumn, TypedCell), CodecError> {
+        let result = decode_typed_result(
+            RawQueryResult::Rows {
+                columns: vec![column],
+                rows: vec![vec![cell]],
+            },
+            TypedResultLimits::default(),
+        )?;
+        let TypedQueryResult::Rows(rows) = result else {
+            panic!("row input returned command metadata");
+        };
+        let mut columns = rows.columns.into_iter();
+        let mut rows = rows.rows.into_iter();
+        let mut cells = rows.next().expect("one row").into_iter();
+        Ok((
+            columns.next().expect("one column"),
+            cells.next().expect("one cell"),
+        ))
+    }
+
+    fn decimal_lexemes() -> impl Strategy<Value = String> {
+        use std::fmt::Write as _;
+
+        (
+            any::<bool>(),
+            prop::collection::vec(b'0'..=b'9', 1..33),
+            prop::option::of(prop::collection::vec(b'0'..=b'9', 0..17)),
+            prop::option::of((any::<bool>(), -999_i16..=999)),
+        )
+            .prop_map(|(negative, integer, fraction, exponent)| {
+                let mut value = String::new();
+                if negative {
+                    value.push('-');
+                }
+                value.extend(integer.into_iter().map(char::from));
+                if let Some(fraction) = fraction {
+                    value.push('.');
+                    value.extend(fraction.into_iter().map(char::from));
+                }
+                if let Some((uppercase, exponent)) = exponent {
+                    value.push(if uppercase { 'E' } else { 'e' });
+                    write!(&mut value, "{exponent:+}").expect("string formatting cannot fail");
+                }
+                value
+            })
+    }
+
+    #[test]
+    fn typed_numeric_column_mapping_is_metadata_driven() {
+        for vendor_type in [
+            MYSQL_TYPE_TINY,
+            MYSQL_TYPE_SHORT,
+            MYSQL_TYPE_LONG,
+            MYSQL_TYPE_LONGLONG,
+            MYSQL_TYPE_INT24,
+        ] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Ok((TypedColumnType::Signed, None))
+            );
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, UNSIGNED_FLAG, 63)),
+                Ok((TypedColumnType::Unsigned, None))
+            );
+        }
+        for vendor_type in [MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Ok((TypedColumnType::Decimal, None))
+            );
+        }
+        for vendor_type in [MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Ok((TypedColumnType::Floating, None))
+            );
+        }
+        assert_eq!(
+            classify_typed_column(&typed_column(MYSQL_TYPE_NULL, 0, 63)),
+            Ok((TypedColumnType::Null, None))
+        );
+        let mut contradictory = typed_column(MYSQL_TYPE_LONG, 0, 63);
+        contradictory.charset = 255;
+        assert_eq!(
+            classify_typed_column(&contradictory),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            classify_typed_column(&typed_column(MYSQL_TYPE_LONG, 0, 0)),
+            Err(CodecError::Protocol)
+        );
+    }
+
+    #[test]
+    fn typed_text_temporal_and_unsupported_mapping_is_exhaustive() {
+        for (vendor_type, temporal_type) in [
+            (MYSQL_TYPE_DATE, TypedTemporalType::Date),
+            (MYSQL_TYPE_TIME, TypedTemporalType::Time),
+            (MYSQL_TYPE_TIME2, TypedTemporalType::Time),
+            (MYSQL_TYPE_DATETIME, TypedTemporalType::Datetime),
+            (MYSQL_TYPE_DATETIME2, TypedTemporalType::Datetime),
+            (MYSQL_TYPE_TIMESTAMP, TypedTemporalType::Timestamp),
+            (MYSQL_TYPE_TIMESTAMP2, TypedTemporalType::Timestamp),
+            (MYSQL_TYPE_YEAR, TypedTemporalType::Year),
+        ] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Ok((TypedColumnType::Temporal, Some(temporal_type)))
+            );
+        }
+        for vendor_type in [
+            MYSQL_TYPE_VARCHAR,
+            MYSQL_TYPE_ENUM,
+            MYSQL_TYPE_SET,
+            MYSQL_TYPE_TINY_BLOB,
+            MYSQL_TYPE_MEDIUM_BLOB,
+            MYSQL_TYPE_LONG_BLOB,
+            MYSQL_TYPE_BLOB,
+            MYSQL_TYPE_VAR_STRING,
+            MYSQL_TYPE_STRING,
+        ] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 255)),
+                Ok((TypedColumnType::Text, None))
+            );
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, BINARY_FLAG, 255)),
+                Ok((TypedColumnType::Bytes, None))
+            );
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Ok((TypedColumnType::Bytes, None))
+            );
+        }
+        assert_eq!(
+            classify_typed_column(&typed_column(MYSQL_TYPE_JSON, BINARY_FLAG, 46)),
+            Ok((TypedColumnType::Text, None))
+        );
+        for vendor_type in [MYSQL_TYPE_BIT, MYSQL_TYPE_GEOMETRY] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Ok((TypedColumnType::Bytes, None))
+            );
+        }
+
+        for vendor_type in [14, 20, 21, 100, 241, 242, 244] {
+            assert_eq!(
+                classify_typed_column(&typed_column(vendor_type, 0, 63)),
+                Err(CodecError::Unsupported),
+                "vendor type {vendor_type}"
+            );
+        }
+        assert_eq!(
+            classify_typed_column(&typed_column(MYSQL_TYPE_INVALID, 0, 63)),
+            Err(CodecError::Protocol)
+        );
+    }
+
+    #[test]
+    fn signed_integer_vendor_ranges_and_lexemes_are_exact() {
+        for (vendor_type, minimum, maximum) in [
+            (MYSQL_TYPE_TINY, i64::from(i8::MIN), i64::from(i8::MAX)),
+            (MYSQL_TYPE_SHORT, i64::from(i16::MIN), i64::from(i16::MAX)),
+            (MYSQL_TYPE_LONG, i64::from(i32::MIN), i64::from(i32::MAX)),
+            (MYSQL_TYPE_INT24, -8_388_608, 8_388_607),
+            (MYSQL_TYPE_LONGLONG, i64::MIN, i64::MAX),
+        ] {
+            for value in [minimum, 0, maximum] {
+                let (_, cell) = typed_cell(
+                    typed_column(vendor_type, 0, 63),
+                    RawCell::Bytes(value.to_string().into_bytes()),
+                )
+                .expect("signed boundary");
+                assert_eq!(cell, TypedCell::Signed(value));
+            }
+        }
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_TINY, 0, 63),
+                RawCell::Bytes(b"128".to_vec()),
+            ),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_LONGLONG, 0, 63),
+                RawCell::Bytes(b"9223372036854775808".to_vec()),
+            ),
+            Err(CodecError::Unsupported)
+        );
+        for (lexeme, expected) in [(b"+0007".as_slice(), 7), (b"-0000", 0)] {
+            assert_eq!(
+                typed_cell(
+                    typed_column(MYSQL_TYPE_LONG, 0, 63),
+                    RawCell::Bytes(lexeme.to_vec()),
+                )
+                .map(|(_column, cell)| cell),
+                Ok(TypedCell::Signed(expected))
+            );
+        }
+        for malformed in [b"".as_slice(), b"+", b"--1", b"1 ", b"1.0"] {
+            assert_eq!(
+                typed_cell(
+                    typed_column(MYSQL_TYPE_LONG, 0, 63),
+                    RawCell::Bytes(malformed.to_vec()),
+                ),
+                Err(CodecError::Encoding),
+                "lexeme {malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_integer_vendor_ranges_and_lexemes_are_exact() {
+        for (vendor_type, maximum) in [
+            (MYSQL_TYPE_TINY, u64::from(u8::MAX)),
+            (MYSQL_TYPE_SHORT, u64::from(u16::MAX)),
+            (MYSQL_TYPE_LONG, u64::from(u32::MAX)),
+            (MYSQL_TYPE_INT24, 16_777_215),
+            (MYSQL_TYPE_LONGLONG, u64::MAX),
+        ] {
+            for value in [0, maximum] {
+                let (_, cell) = typed_cell(
+                    typed_column(vendor_type, UNSIGNED_FLAG, 63),
+                    RawCell::Bytes(value.to_string().into_bytes()),
+                )
+                .expect("unsigned boundary");
+                assert_eq!(cell, TypedCell::Unsigned(value));
+            }
+        }
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_TINY, UNSIGNED_FLAG, 63),
+                RawCell::Bytes(b"256".to_vec()),
+            ),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_LONGLONG, UNSIGNED_FLAG, 63),
+                RawCell::Bytes(b"18446744073709551616".to_vec()),
+            ),
+            Err(CodecError::Unsupported)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_LONG, UNSIGNED_FLAG, 63),
+                RawCell::Bytes(b"+0007".to_vec()),
+            )
+            .map(|(_column, cell)| cell),
+            Ok(TypedCell::Unsigned(7))
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_LONG, UNSIGNED_FLAG, 63),
+                RawCell::Bytes(b"-1".to_vec()),
+            ),
+            Err(CodecError::Encoding)
+        );
+    }
+
+    #[test]
+    fn decimal_and_temporal_values_preserve_wire_lexemes() {
+        for lexeme in ["0", "-0.00", "+001.2300", ".5", "1.", "1.20e+003"] {
+            let (_, cell) = typed_cell(
+                typed_column(MYSQL_TYPE_NEWDECIMAL, 0, 63),
+                RawCell::Bytes(lexeme.as_bytes().to_vec()),
+            )
+            .expect("exact decimal");
+            assert_eq!(cell, TypedCell::Decimal(lexeme.to_owned()));
+        }
+        for malformed in ["", ".", "1e", "NaN", "inf", " 1", "1_0"] {
+            assert_eq!(
+                typed_cell(
+                    typed_column(MYSQL_TYPE_NEWDECIMAL, 0, 63),
+                    RawCell::Bytes(malformed.as_bytes().to_vec()),
+                ),
+                Err(CodecError::Encoding),
+                "decimal {malformed:?}"
+            );
+        }
+
+        let exact = "0000-00-00 01:02:03.004000+99";
+        let (column, cell) = typed_cell(
+            typed_column(MYSQL_TYPE_TIMESTAMP2, 0, 63),
+            RawCell::Bytes(exact.as_bytes().to_vec()),
+        )
+        .expect("temporal lexeme");
+        assert_eq!(column.column_type, TypedColumnType::Temporal);
+        assert_eq!(column.temporal_type, Some(TypedTemporalType::Timestamp));
+        assert_eq!(cell, TypedCell::Temporal(exact.to_owned()));
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_DATE, 0, 63),
+                RawCell::Bytes(Vec::new()),
+            ),
+            Err(CodecError::Encoding)
+        );
+    }
+
+    #[test]
+    fn floating_policy_accepts_explicit_specials_and_rejects_finite_range_loss() {
+        for vendor_type in [MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE] {
+            let (_, negative_zero) = typed_cell(
+                typed_column(vendor_type, 0, 63),
+                RawCell::Bytes(b"-0.0".to_vec()),
+            )
+            .expect("negative zero");
+            let TypedCell::Floating(negative_zero) = negative_zero else {
+                panic!("expected floating value");
+            };
+            assert!(negative_zero.is_sign_negative());
+
+            let (_, infinity) = typed_cell(
+                typed_column(vendor_type, 0, 63),
+                RawCell::Bytes(b"+Infinity".to_vec()),
+            )
+            .expect("explicit infinity");
+            assert_eq!(infinity, TypedCell::Floating(f64::INFINITY));
+
+            let (_, nan) = typed_cell(
+                typed_column(vendor_type, 0, 63),
+                RawCell::Bytes(b"NaN".to_vec()),
+            )
+            .expect("explicit NaN");
+            let TypedCell::Floating(nan) = nan else {
+                panic!("expected NaN");
+            };
+            assert!(nan.is_nan());
+        }
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_FLOAT, 0, 63),
+                RawCell::Bytes(b"1e100".to_vec()),
+            ),
+            Err(CodecError::Unsupported)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_DOUBLE, 0, 63),
+                RawCell::Bytes(b"1e9999".to_vec()),
+            ),
+            Err(CodecError::Unsupported)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_FLOAT, 0, 63),
+                RawCell::Bytes(b"1e-100".to_vec()),
+            ),
+            Err(CodecError::Unsupported)
+        );
+        for malformed in [b"".as_slice(), b".", b"1e", b"1 2", b"nanx"] {
+            assert_eq!(
+                typed_cell(
+                    typed_column(MYSQL_TYPE_DOUBLE, 0, 63),
+                    RawCell::Bytes(malformed.to_vec()),
+                ),
+                Err(CodecError::Encoding)
+            );
+        }
+    }
+
+    #[test]
+    fn null_text_and_bytes_are_tagged_without_guessing() {
+        assert_eq!(
+            typed_cell(typed_column(MYSQL_TYPE_LONG, 0, 63), RawCell::Null,)
+                .map(|(_column, cell)| cell),
+            Ok(TypedCell::Null)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_NULL, 0, 63),
+                RawCell::Bytes(b"not-null".to_vec()),
+            ),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_JSON, BINARY_FLAG, 46),
+                RawCell::Bytes(br#"{"x":1}"#.to_vec()),
+            )
+            .map(|(_column, cell)| cell),
+            Ok(TypedCell::Text(r#"{"x":1}"#.to_owned()))
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_JSON, BINARY_FLAG, 46),
+                RawCell::Bytes(vec![0xff]),
+            ),
+            Err(CodecError::Encoding)
+        );
+        assert_eq!(
+            typed_cell(
+                typed_column(MYSQL_TYPE_VAR_STRING, BINARY_FLAG, 255),
+                RawCell::Text("still bytes".to_owned()),
+            )
+            .map(|(_column, cell)| cell),
+            Ok(TypedCell::Bytes(b"still bytes".to_vec()))
+        );
+    }
+
+    #[test]
+    fn typed_conversion_checks_whole_result_before_returning_any_rows() {
+        let result = RawQueryResult::Rows {
+            columns: vec![typed_column(MYSQL_TYPE_LONG, 0, 63)],
+            rows: vec![
+                vec![RawCell::Bytes(b"1".to_vec())],
+                vec![RawCell::Bytes(b"server-secret".to_vec())],
+            ],
+        };
+        assert_eq!(
+            decode_typed_result(result, TypedResultLimits::default()),
+            Err(CodecError::Encoding)
+        );
+        assert_eq!(
+            decode_typed_result(
+                RawQueryResult::Rows {
+                    columns: vec![typed_column(MYSQL_TYPE_LONG, 0, 63)],
+                    rows: vec![vec![]],
+                },
+                TypedResultLimits::default(),
+            ),
+            Err(CodecError::Protocol)
+        );
+    }
+
+    #[test]
+    fn typed_logical_bounds_are_inclusive_and_never_truncate() {
+        let integer = || RawQueryResult::Rows {
+            columns: vec![typed_column(MYSQL_TYPE_LONG, 0, 63)],
+            rows: vec![vec![RawCell::Bytes(b"1".to_vec())]],
+        };
+        assert!(
+            decode_typed_result(
+                integer(),
+                TypedResultLimits {
+                    max_rows: Some(1),
+                    max_result_bytes: Some(8),
+                },
+            )
+            .is_ok()
+        );
+        for limits in [
+            TypedResultLimits {
+                max_rows: Some(0),
+                max_result_bytes: Some(8),
+            },
+            TypedResultLimits {
+                max_rows: Some(1),
+                max_result_bytes: Some(7),
+            },
+        ] {
+            assert_eq!(
+                decode_typed_result(integer(), limits),
+                Err(CodecError::Limit)
+            );
+        }
+
+        let command = || RawQueryResult::Command {
+            affected_rows: 3,
+            last_insert_id: Some(0),
+            warnings: 2,
+            status_flags: 2,
+        };
+        assert!(
+            decode_typed_result(
+                command(),
+                TypedResultLimits {
+                    max_rows: None,
+                    max_result_bytes: Some(20),
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            decode_typed_result(
+                command(),
+                TypedResultLimits {
+                    max_rows: None,
+                    max_result_bytes: Some(19),
+                },
+            ),
+            Err(CodecError::Limit)
+        );
+    }
+
+    #[test]
+    fn command_ok_retains_all_metadata_and_rejects_ambiguous_packets() {
+        let packet = [0x00, 3, 7, 2, 0, 9, 0];
+        assert_eq!(
+            parse_ok_packet(&packet),
+            Ok(CommandMetadata {
+                affected_rows: 3,
+                last_insert_id: Some(7),
+                warnings: 9,
+                status_flags: 2,
+            })
+        );
+        assert_eq!(
+            read_query_result(|_sequence| Ok(packet.to_vec()), &[]),
+            Ok(RawQueryResult::Command {
+                affected_rows: 3,
+                last_insert_id: Some(7),
+                warnings: 9,
+                status_flags: 2,
+            })
+        );
+        assert_eq!(
+            parse_ok_packet(&[0xff, 0, 0, 0, 0, 0, 0]),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            parse_ok_packet(&[0x00, 0xfb, 0, 0, 0, 0, 0]),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            parse_ok_packet(&[0x00, 0, 0, 8, 0, 0, 0]),
+            Err(CodecError::Unsupported)
+        );
+    }
+
     #[test]
     fn supported_invalid_utf8_is_encoding_and_binary_is_exact() {
         assert_eq!(
@@ -1199,9 +2272,71 @@ mod tests {
             let _ = parse_auth_response(&bytes, &[], AuthPlugin::CachingSha2Password);
             let _ = parse_auth_response(&bytes, &[], AuthPlugin::MysqlNativePassword);
             let _ = parse_ok_affected_rows(&bytes);
+            let _ = parse_ok_packet(&bytes);
             let _ = parse_column(&bytes);
             let _ = parse_row(&bytes, &[column(255)], MAX_CELL_PAYLOAD_BYTES);
             let _ = terminator_status(&bytes);
+        }
+
+        #[test]
+        fn signed_longlong_roundtrips_every_i64(value in any::<i64>()) {
+            let decoded = typed_cell(
+                typed_column(MYSQL_TYPE_LONGLONG, 0, 63),
+                RawCell::Bytes(value.to_string().into_bytes()),
+            );
+            prop_assert_eq!(
+                decoded.map(|(_column, cell)| cell),
+                Ok(TypedCell::Signed(value))
+            );
+        }
+
+        #[test]
+        fn unsigned_longlong_roundtrips_every_u64(value in any::<u64>()) {
+            let decoded = typed_cell(
+                typed_column(MYSQL_TYPE_LONGLONG, UNSIGNED_FLAG, 63),
+                RawCell::Bytes(value.to_string().into_bytes()),
+            );
+            prop_assert_eq!(
+                decoded.map(|(_column, cell)| cell),
+                Ok(TypedCell::Unsigned(value))
+            );
+        }
+
+        #[test]
+        fn decimal_property_preserves_every_accepted_lexeme(lexeme in decimal_lexemes()) {
+            let decoded = typed_cell(
+                typed_column(MYSQL_TYPE_NEWDECIMAL, 0, 63),
+                RawCell::Bytes(lexeme.as_bytes().to_vec()),
+            );
+            prop_assert_eq!(
+                decoded.map(|(_column, cell)| cell),
+                Ok(TypedCell::Decimal(lexeme))
+            );
+        }
+
+        #[test]
+        fn hostile_typed_metadata_and_values_never_panic(
+            vendor_type in any::<u8>(),
+            flags in any::<u16>(),
+            charset in any::<u16>(),
+            collation in any::<u16>(),
+            bytes in prop::collection::vec(any::<u8>(), 0..256),
+            use_null in any::<bool>(),
+        ) {
+            let mut column = typed_column(vendor_type, flags, collation);
+            column.charset = charset;
+            let cell = if use_null {
+                RawCell::Null
+            } else {
+                RawCell::Bytes(bytes)
+            };
+            let _ = decode_typed_result(
+                RawQueryResult::Rows {
+                    columns: vec![column],
+                    rows: vec![vec![cell]],
+                },
+                TypedResultLimits::default(),
+            );
         }
 
         #[test]
