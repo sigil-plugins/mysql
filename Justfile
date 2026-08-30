@@ -15,7 +15,10 @@ build:
 sdk-drift:
     ./scripts/check-sdk-lock.sh
 
-check: sdk-drift
+signal-cleanup-check:
+    ./scripts/check-live-cleanup-signals.sh
+
+check: sdk-drift signal-cleanup-check
     cargo fmt --all -- --check
     cargo test --locked
     cargo clippy --all-targets --locked -- -D warnings
@@ -32,3 +35,6 @@ reproducible:
 
 sigil-check: check
     ./scripts/check-sigil-compatibility.sh "{{sigil}}" "{{sigil_checkout}}"
+
+live-acceptance: dist
+    ./scripts/check-live-acceptance.sh "{{sigil}}" "{{sigil_checkout}}"

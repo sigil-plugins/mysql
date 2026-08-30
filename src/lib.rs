@@ -614,6 +614,7 @@ mod export {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::cell::Cell as CounterCell;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -1108,6 +1109,90 @@ mod tests {
             1,
             "drop cannot close an idempotently closed stream"
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn arbitrary_session_call_order_matches_terminal_state_machine(
+            actions in prop::collection::vec(0_u8..6, 0..64),
+        ) {
+            let mut packets = Vec::new();
+            let mut model_open = true;
+            for action in &actions {
+                match (*action, model_open) {
+                    (0, true) => packets.extend(row_result_packets(3, 0, &[Some(b"7")])),
+                    (1, true) => packets.push((1, ok_packet(1, 9, 2))),
+                    (2, true) => model_open = false,
+                    (5, true) => packets.push((1, server_error_packet())),
+                    _ => {}
+                }
+            }
+
+            let (connection, closes) =
+                scripted_connection(packets, TypedResultLimits::default());
+            let oversized = "x".repeat(MAX_SQL_BYTES + 1);
+            model_open = true;
+            let mut expected_network_calls = 0;
+
+            for action in actions {
+                match action {
+                    0 if model_open => {
+                        let rows = connection.query_typed("SELECT 7").expect("scripted row");
+                        prop_assert!(matches!(rows.rows[0].cells.as_slice(), [Cell::Signed(7)]));
+                        expected_network_calls += 1;
+                    }
+                    1 if model_open => {
+                        let result = connection.exec_typed("UPDATE fixture").expect("scripted OK");
+                        prop_assert_eq!(result.affected_rows, 1);
+                        prop_assert_eq!(result.last_insert_id, Some(9));
+                        prop_assert_eq!(result.warnings, 2);
+                        expected_network_calls += 1;
+                    }
+                    2 => {
+                        connection.close_state();
+                        connection.close_state();
+                        model_open = false;
+                    }
+                    3 => {
+                        let error = connection.query_typed("").expect_err("empty SQL");
+                        prop_assert_eq!(error.class, ErrorClass::Invalid);
+                    }
+                    4 => {
+                        let error = connection.exec_typed(&oversized).expect_err("oversized SQL");
+                        prop_assert_eq!(error.class, ErrorClass::Limit);
+                    }
+                    5 if model_open => {
+                        let error = connection
+                            .query_typed("SELECT rejected")
+                            .expect_err("scripted server error");
+                        prop_assert_eq!(error.class, ErrorClass::Server);
+                        prop_assert_eq!(error.vendor_code, Some(1201));
+                        prop_assert_eq!(error.sqlstate.as_deref(), Some("HY000"));
+                        expected_network_calls += 1;
+                    }
+                    0 | 1 | 5 => {
+                        let error = connection
+                            .query_typed("SELECT must_not_reconnect")
+                            .expect_err("closed resource");
+                        prop_assert_eq!(error.class, ErrorClass::Closed);
+                    }
+                    _ => unreachable!("generated action is in 0..6"),
+                }
+            }
+
+            if model_open {
+                let state = connection.state.borrow();
+                let writes = state.as_ref().expect("open model has live state").stream.writes.borrow();
+                prop_assert_eq!(writes.len(), expected_network_calls * 2);
+            }
+            connection.close_state();
+            connection.close_state();
+            prop_assert_eq!(closes.get(), 1);
+            drop(connection);
+            prop_assert_eq!(closes.get(), 1);
+        }
     }
 
     #[test]
