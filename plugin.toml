@@ -1,12 +1,12 @@
 schema_version = 1
 name = "mysql"
-version = "0.1.3"
+version = "0.2.0"
 description = "bounded MySQL and SingleStore protocol driver for Sigil"
 license = "MIT"
 
 [component]
 file = "plugin.wasm"
-entrypoint = "sigil:sql/driver@0.1.0"
+entrypoint = "sigil:sql/driver@0.2.0"
 
 [requires]
 sigil = ">=0.33.1, <1.0.0"

@@ -1,0 +1,12 @@
+[package]
+name = "sigil-mysql-compat-seed"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+semver = "=1.0.28"
+sigil = { path = "@SIGIL_CHECKOUT@" }
+
+[lints.rust]
+unsafe_code = "deny"

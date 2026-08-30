@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-CONNECT_EXPORT = "sigil:sql/driver@0.1.0#connect"
+CONNECT_EXPORT = "sigil:sql/driver@0.2.0#connect"
 EXPECTED_DIGEST_WIPE_ORDERS = {
     (20, 20, 20, 32, 32, 32),
     (32, 32, 32, 20, 20, 20),
