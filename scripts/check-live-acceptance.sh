@@ -63,9 +63,57 @@ mysql_name="sigil-mysql-live-mysql-$suffix"
 readonly singlestore_name mysql_name
 started_containers=()
 peer_pids=()
+attached_volumes=()
+
+remember_volume() {
+  local candidate=$1
+  local existing
+  for existing in "${attached_volumes[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  attached_volumes+=("$candidate")
+}
+
+inventory_container() {
+  local name=$1
+  local phase=$2
+  local identity_file="$EVIDENCE/$name.$phase.identity.txt"
+  local mounts_file="$EVIDENCE/$name.$phase.mounts.json"
+  local volumes_file="$EVIDENCE/$name.$phase.volumes.txt"
+  "$ENGINE" container inspect --format \
+    'id={{.Id}} name={{.Name}} image={{.Image}}' "$name" >"$identity_file"
+  "$ENGINE" container inspect --format '{{json .Mounts}}' "$name" >"$mounts_file"
+  python3 - "$mounts_file" "$volumes_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+mounts = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(mounts, list):
+    raise SystemExit("container inspection has no mount inventory")
+volumes = []
+for mount in mounts:
+    if mount.get("Type") == "volume":
+        name = mount.get("Name")
+        if not isinstance(name, str) or not name:
+            raise SystemExit("volume mount has no stable name")
+        volumes.append(name)
+Path(sys.argv[2]).write_text(
+    "".join(f"{name}\n" for name in sorted(set(volumes))), encoding="utf-8"
+)
+PY
+  while IFS= read -r volume; do
+    if [[ -n "$volume" ]]; then
+      remember_volume "$volume"
+    fi
+  done <"$volumes_file"
+}
 
 cleanup() {
   local status=$?
+  local name volume
   set +e
   : >"$EVIDENCE/teardown.txt"
   for pid in "${peer_pids[@]}"; do
@@ -74,17 +122,66 @@ cleanup() {
       wait "$pid" >>"$EVIDENCE/teardown.txt" 2>&1
     fi
   done
+  : >"$EVIDENCE/managed-containers.before-cleanup.txt"
+  for name in "${started_containers[@]}"; do
+    if "$ENGINE" container inspect "$name" >/dev/null 2>&1; then
+      echo "$name present" >>"$EVIDENCE/managed-containers.before-cleanup.txt"
+      if ! inventory_container "$name" before-cleanup \
+        >>"$EVIDENCE/teardown.txt" 2>&1; then
+        echo "failed to inventory live acceptance container: $name" \
+          >>"$EVIDENCE/teardown.txt"
+        status=1
+      fi
+    else
+      echo "$name absent" >>"$EVIDENCE/managed-containers.before-cleanup.txt"
+    fi
+  done
+  : >"$EVIDENCE/managed-volumes.before-cleanup.txt"
+  for volume in "${attached_volumes[@]}"; do
+    if "$ENGINE" volume inspect "$volume" >/dev/null 2>&1; then
+      echo "$volume present" >>"$EVIDENCE/managed-volumes.before-cleanup.txt"
+    else
+      echo "$volume absent" >>"$EVIDENCE/managed-volumes.before-cleanup.txt"
+    fi
+  done
   for name in "${started_containers[@]}"; do
     if "$ENGINE" container inspect "$name" >/dev/null 2>&1; then
       "$ENGINE" stop --time 15 "$name" >>"$EVIDENCE/teardown.txt" 2>&1
-      "$ENGINE" rm "$name" >>"$EVIDENCE/teardown.txt" 2>&1
+      "$ENGINE" rm --volumes "$name" >>"$EVIDENCE/teardown.txt" 2>&1
     fi
   done
-  if [[ -n "$("$ENGINE" ps -aq --filter "name=sigil-mysql-live-.*-$suffix" 2>/dev/null)" ]]; then
-    echo "live acceptance containers remain after teardown" >>"$EVIDENCE/teardown.txt"
-    status=1
-  else
-    echo "all live acceptance containers removed" >>"$EVIDENCE/teardown.txt"
+  : >"$EVIDENCE/managed-containers.after.txt"
+  for name in "${started_containers[@]}"; do
+    if "$ENGINE" container inspect "$name" >/dev/null 2>&1; then
+      echo "$name present" >>"$EVIDENCE/managed-containers.after.txt"
+      echo "live acceptance container remains after teardown: $name" \
+        >>"$EVIDENCE/teardown.txt"
+      status=1
+    else
+      echo "$name absent" >>"$EVIDENCE/managed-containers.after.txt"
+    fi
+  done
+  : >"$EVIDENCE/managed-volumes.after.txt"
+  for volume in "${attached_volumes[@]}"; do
+    if "$ENGINE" volume inspect "$volume" >/dev/null 2>&1; then
+      if ! grep -Fx "$volume" "$EVIDENCE/engine-volumes.before.txt" >/dev/null; then
+        "$ENGINE" volume rm "$volume" >>"$EVIDENCE/teardown.txt" 2>&1
+      fi
+    fi
+    if "$ENGINE" volume inspect "$volume" >/dev/null 2>&1; then
+      echo "$volume present" >>"$EVIDENCE/managed-volumes.after.txt"
+      echo "live acceptance volume remains after teardown: $volume" \
+        >>"$EVIDENCE/teardown.txt"
+      status=1
+    else
+      echo "$volume absent" >>"$EVIDENCE/managed-volumes.after.txt"
+    fi
+  done
+  "$ENGINE" volume ls --format '{{.Name}}' | sort \
+    >"$EVIDENCE/engine-volumes.after.txt"
+  if [[ "$status" -eq 0 ]]; then
+    echo "all live acceptance containers and volumes removed" \
+      >>"$EVIDENCE/teardown.txt"
   fi
   if [[ "${KEEP_LIVE_SCRATCH:-0}" == 1 ]]; then
     printf 'scratch retained: %s\n' "$SCRATCH" >&2
@@ -95,6 +192,18 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT INT TERM
+
+"$ENGINE" volume ls --format '{{.Name}}' | sort \
+  >"$EVIDENCE/engine-volumes.before.txt"
+: >"$EVIDENCE/managed-containers.before.txt"
+for name in "$singlestore_name" "$mysql_name"; do
+  if "$ENGINE" container inspect "$name" >/dev/null 2>&1; then
+    echo "$name present" >>"$EVIDENCE/managed-containers.before.txt"
+    echo "managed container name already exists: $name" >&2
+    exit 1
+  fi
+  echo "$name absent" >>"$EVIDENCE/managed-containers.before.txt"
+done
 
 wait_for_exec() {
   local name=$1
@@ -262,6 +371,7 @@ ROOT_PASSWORD="$SINGLESTORE_PASSWORD" "$ENGINE" run -d \
   -p 127.0.0.1::3306 "$SINGLESTORE_IMAGE" \
   >"$EVIDENCE/singlestore.container-id"
 started_containers+=("$singlestore_name")
+inventory_container "$singlestore_name" started
 
 MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_SECRET" \
 MYSQL_DATABASE=app \
@@ -272,6 +382,7 @@ MYSQL_PASSWORD="$MYSQL_USER_PASSWORD" \
     -p 127.0.0.1::3306 "$MYSQL_IMAGE" \
     >"$EVIDENCE/mysql.container-id"
 started_containers+=("$mysql_name")
+inventory_container "$mysql_name" started
 
 wait_for_exec "$singlestore_name" "$SINGLESTORE_PASSWORD" memsql root
 wait_for_exec "$mysql_name" "$MYSQL_ROOT_SECRET" mysql root
@@ -380,13 +491,14 @@ import sys
 
 actual = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 expected = {
-    "connections": 3,
+    "connections": 4,
     "queries": [
         "SELECT malformed_metadata",
         "SELECT invalid_integer",
+        "SELECT integer_overflow",
         "SELECT oversized_packet",
     ],
-    "terminal_eof": 3,
+    "terminal_eof": 4,
 }
 if actual != expected:
     raise SystemExit(f"typed fault peer evidence differs: {actual!r}")

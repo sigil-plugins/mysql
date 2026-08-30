@@ -29,6 +29,7 @@ return {
     local mysql = require("wasm.mysql")
     expect_terminal(connect(mysql), "SELECT malformed_metadata", "protocol")
     expect_terminal(connect(mysql), "SELECT invalid_integer", "encoding")
+    expect_terminal(connect(mysql), "SELECT integer_overflow", "protocol")
     expect_terminal(connect(mysql), "SELECT oversized_packet", "limit")
   end,
 }

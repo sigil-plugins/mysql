@@ -39,9 +39,9 @@ just live-acceptance
 
 `OCI_ENGINE=podman` or `OCI_ENGINE=docker` selects a runner explicitly. The
 script gives every container a unique name, publishes SQL only on an ephemeral
-loopback port, uses no durable volume, and stops and removes every container in
-its exit trap. `KEEP_LIVE_SCRATCH=1` retains the temporary Sigil project for
-diagnosis; it does not retain service state.
+loopback port, and stops and removes every container plus every volume created
+for it in the exit trap. `KEEP_LIVE_SCRATCH=1` retains the temporary Sigil
+project for diagnosis; it does not retain service state.
 
 Sigil 0.33.0 already contains the SQL 0.2 host contract but predates this
 candidate's declared 0.33.1 floor. For that one version only, the harness
@@ -70,8 +70,9 @@ path.
 
 Separate scenarios prove a one-second operator timeout, socket-loss
 `transport`, malformed metadata `protocol`, invalid integer `encoding`, and
-oversized packet `limit`. The hostile peer records the exact statement trace,
-requires EOF after every terminal error, and rejects reconnection or replay.
+signed `TINYINT` overflow `protocol`, and oversized packet `limit`. The
+hostile peer records the exact statement trace, requires EOF after every
+terminal error, and rejects reconnection or replay.
 A one-KiB host wire ceiling is checked both through the lossy JSON
 `plugin_infrastructure` projection and the human diagnostic's exact
 `PLUGIN_RESOURCE_LIMIT`; the report must contain only the successful connect
@@ -80,8 +81,9 @@ assertion, never partial row output.
 Each run writes ignored evidence under `target/live-acceptance/run.*`, including
 image pull identities, raw handshake probes, auth-plugin evidence, JSON
 reports, hostile-peer traces, service logs, candidate identities, elapsed
-times, and `teardown.txt`. A successful teardown file ends with:
+times, container and volume inventories before and after teardown, and
+`teardown.txt`. A successful teardown file ends with:
 
 ```text
-all live acceptance containers removed
+all live acceptance containers and volumes removed
 ```

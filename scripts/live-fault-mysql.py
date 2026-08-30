@@ -101,6 +101,7 @@ def serve_typed(listener: socket.socket) -> dict[str, object]:
     expected = [
         "SELECT malformed_metadata",
         "SELECT invalid_integer",
+        "SELECT integer_overflow",
         "SELECT oversized_packet",
     ]
     observed = []
@@ -116,6 +117,8 @@ def serve_typed(listener: socket.socket) -> dict[str, object]:
                 send_row_result(connection, 243, b"x")
             elif index == 1:
                 send_row_result(connection, 8, b"not-integer")
+            elif index == 2:
+                send_row_result(connection, 1, b"128")
             else:
                 connection.sendall((1_048_577).to_bytes(3, "little") + b"\x01")
             require_eof(connection)
@@ -126,8 +129,8 @@ def serve_typed(listener: socket.socket) -> dict[str, object]:
         extra = None
     if extra is not None:
         extra.close()
-        raise AssertionError("client opened an unexpected fourth connection")
-    return {"connections": 3, "queries": observed, "terminal_eof": 3}
+        raise AssertionError("client opened an unexpected fifth connection")
+    return {"connections": 4, "queries": observed, "terminal_eof": 4}
 
 
 def serve_transport(listener: socket.socket) -> dict[str, object]:
