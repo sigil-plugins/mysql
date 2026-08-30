@@ -15,6 +15,10 @@ mod bindings {
     });
 }
 
+#[allow(
+    dead_code,
+    reason = "the reviewed SQL 0.2 codec is staged for the separate adapter integration bone"
+)]
 mod protocol;
 
 use bindings::exports::sigil::sql::driver::{
@@ -413,7 +417,7 @@ impl GuestConnection for MysqlConnection {
             }
         };
         Ok(match result {
-            RawQueryResult::Command { affected_rows } => {
+            RawQueryResult::Command { affected_rows, .. } => {
                 QueryResult::Command(CommandResult { affected_rows })
             }
             RawQueryResult::Rows { columns, rows } => QueryResult::Rows(RowSet {
