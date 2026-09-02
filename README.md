@@ -75,19 +75,16 @@ one GitHub OIDC/Sigstore package attestation, and publishes an immutable tag and
 release. It has no long-lived signing secret and never resumes or replaces a
 partial version.
 
-Version 0.2.0 is an unpublished source candidate. It includes the additive
+Version 0.2.0 is the current public stable release. It includes the additive
 `sigil:host/net-policy@1.0.0` contract, SingleStore-compatible
 `mysql_native_password`, and the typed SQL 0.2 session contract. It requires
-Sigil 0.33.1 or newer; Sigil 0.33.1 is public, but this plugin candidate has no
-official package asset. Do not use `sigil plugin install mysql@0.2.0` or add
-that identity to a project lock until a separately authorized release is
-published and verified. Build-from-source packages are for isolated validation
-only.
+Sigil 0.33.1 or newer and is available as an immutable keyless-provenance
+package. Add the exact public identity with `sigil plugin add mysql@0.2.0`.
 Its deterministic fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting,
 the existing MySQL 8.4 `caching_sha2_password` path, repeated calls on one
 session, typed boundary values, exact command metadata, and fail-closed limits.
 
-| Public 0.1.2 | Unpublished 0.2.0 source candidate |
+| Public 0.1.2 | Public stable 0.2.0 |
 |---|---|
 | `query` returns a row-or-command variant | row-only `query` plus command-only `exec` |
 | NULL, text, and bytes cells | tagged signed, unsigned, floating, exact decimal, temporal, text, bytes, and NULL |
