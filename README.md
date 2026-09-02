@@ -75,13 +75,24 @@ one GitHub OIDC/Sigstore package attestation, and publishes an immutable tag and
 release. It has no long-lived signing secret and never resumes or replaces a
 partial version.
 
-Version 0.2.0 is an unpublished release candidate. It includes the additive
+Version 0.2.0 is an unpublished source candidate. It includes the additive
 `sigil:host/net-policy@1.0.0` contract, SingleStore-compatible
 `mysql_native_password`, and the typed SQL 0.2 session contract. It requires
-Sigil 0.33.1 or newer; a compatible Sigil release has not yet been published.
+Sigil 0.33.1 or newer; Sigil 0.33.1 is public, but this plugin candidate has no
+official package asset. Do not use `sigil plugin install mysql@0.2.0` or add
+that identity to a project lock until a separately authorized release is
+published and verified. Build-from-source packages are for isolated validation
+only.
 Its deterministic fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting,
 the existing MySQL 8.4 `caching_sha2_password` path, repeated calls on one
 session, typed boundary values, exact command metadata, and fail-closed limits.
+
+| Public 0.1.2 | Unpublished 0.2.0 source candidate |
+|---|---|
+| `query` returns a row-or-command variant | row-only `query` plus command-only `exec` |
+| NULL, text, and bytes cells | tagged signed, unsigned, floating, exact decimal, temporal, text, bytes, and NULL |
+| fixed result ceilings | `max-rows` and `max-result-bytes` may lower, never raise, fixed and host ceilings |
+| MySQL 8.4 `caching_sha2_password` | also supports SingleStore's MySQL 5.7 dialect and `mysql_native_password` |
 
 ## Lua shape
 
@@ -92,9 +103,21 @@ local connection, err = mysql.connect({
   ["username-secret"] = "MYSQL_USER",
   ["password-secret"] = "MYSQL_PASSWORD",
   database = "app",
+  ["max-rows"] = 1000,
+  ["max-result-bytes"] = 8 * 1024 * 1024,
 })
-local rows, query_err = connection:query("select marker from lane")
+expect(connection ~= nil, err and err.message)
+local rows, query_err = connection:query(
+  "select unix_timestamp(ts), amount, nullable_note from lane"
+)
+expect(rows ~= nil, query_err and query_err.message)
+expect(rows.rows[1].cells[1].tag == "signed")
+expect(rows.rows[1].cells[2].tag == "decimal")
+expect(rows.rows[1].cells[3].tag == "null")
 local command, exec_err = connection:exec("update lane set seen = 1")
+expect(command ~= nil, exec_err and exec_err.message)
+expect(command["affected-rows"] == 1)
+expect(command.warnings == 0)
 connection:close()
 ```
 
