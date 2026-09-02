@@ -40,12 +40,14 @@ fi
 readonly ENGINE
 
 SINGLESTORE_IMAGE="ghcr.io/singlestore-labs/singlestoredb-dev@sha256:603b0ac0c7992becab334534a3ec1b37bac1a630b3e09cb50369fa222c72c269"
-MYSQL_IMAGE="docker.io/library/mysql@sha256:c296d65ee6ab3ce2f608c1d1b2bdd3c08b087a5834101d76a6db2e00875216cc"
-EXPECTED_COMPONENT_SHA256="571501479e22ba02b47adb8e61b51006ca4d70200a6fb518db0a18e80cce80d3"
-EXPECTED_PACKAGE_SHA256="47e039e312b2ada199a6fa47a30a1c9f9bdb99f1891bc5ef7b11cfbc85b37bdd"
-EXPECTED_COMPONENT_BLAKE3="d876478d14a9b1c89fff63ea54ed31cc3d225dfe04476c409fd02eed2c1585bf"
-EXPECTED_PACKAGE_BLAKE3="b95ae75bb3f6384d04a1f3127a568972ac2f6d462a0ae0e3715ff749aed93fd9"
-readonly SINGLESTORE_IMAGE MYSQL_IMAGE EXPECTED_COMPONENT_SHA256 EXPECTED_PACKAGE_SHA256
+MYSQL_IMAGE="docker.io/library/mysql@sha256:44f98f4dd825a945d2a6a4b7b2f14127b5d07c5aaa07d9d232c2b58936fb76dc"
+CANDIDATE_COMMIT="c6e915bb8b779b49e4582130c6866f08cdfb6d27"
+EXPECTED_COMPONENT_SHA256="9ece6ea3e5fc2f176a0059d41b8d233528ee17482202c8c1e9727fb1e44e698c"
+EXPECTED_PACKAGE_SHA256="ccbee61486021a05d8e692c8010eef77dccc04c8cc4782e2b03b82734a9f8459"
+EXPECTED_COMPONENT_BLAKE3="5abf00e529047497e70d76cd210b7dd6774024e17303624320d89ac20f2c33fe"
+EXPECTED_PACKAGE_BLAKE3="dc06c86d498c256cab7ebadfac294a77d2b87aa3fa71d2ee4244f5dd4499d204"
+readonly SINGLESTORE_IMAGE MYSQL_IMAGE CANDIDATE_COMMIT
+readonly EXPECTED_COMPONENT_SHA256 EXPECTED_PACKAGE_SHA256
 readonly EXPECTED_COMPONENT_BLAKE3 EXPECTED_PACKAGE_BLAKE3
 
 SINGLESTORE_PASSWORD="sigil-live-root-2026"
@@ -351,21 +353,20 @@ start_fault_peer() {
   return 1
 }
 
-if [[ "$(git -C "$ROOT" rev-parse e9659bb2c4b04d83c63391422867b1eb0c7f0901)" != \
-  e9659bb2c4b04d83c63391422867b1eb0c7f0901 ]]; then
-  echo "merged SQL 0.2 candidate commit is unavailable" >&2
+if [[ "$(git -C "$ROOT" rev-parse "$CANDIDATE_COMMIT")" != "$CANDIDATE_COMMIT" ]]; then
+  echo "MySQL 0.2.1-rc.1 candidate commit is unavailable" >&2
   exit 1
 fi
 if ! git -C "$ROOT" merge-base --is-ancestor \
-  e9659bb2c4b04d83c63391422867b1eb0c7f0901 HEAD; then
-  echo "live acceptance workspace does not descend from the merged SQL 0.2 candidate" >&2
+  "$CANDIDATE_COMMIT" HEAD; then
+  echo "live acceptance workspace does not descend from the MySQL 0.2.1-rc.1 candidate" >&2
   exit 1
 fi
 echo "$EXPECTED_COMPONENT_SHA256  $ROOT/plugin.wasm" | sha256sum --check --strict
-echo "$EXPECTED_PACKAGE_SHA256  $ROOT/dist/mysql-0.2.0.sigil-plugin.tar.zst" |
+echo "$EXPECTED_PACKAGE_SHA256  $ROOT/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst" |
   sha256sum --check --strict
 echo "$EXPECTED_COMPONENT_BLAKE3  $ROOT/plugin.wasm" | b3sum --check
-echo "$EXPECTED_PACKAGE_BLAKE3  $ROOT/dist/mysql-0.2.0.sigil-plugin.tar.zst" |
+echo "$EXPECTED_PACKAGE_BLAKE3  $ROOT/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst" |
   b3sum --check
 
 "$ENGINE" pull "$SINGLESTORE_IMAGE" >"$EVIDENCE/singlestore.pull.txt"
@@ -394,14 +395,16 @@ wait_for_exec "$mysql_name" "$MYSQL_ROOT_SECRET" mysql root
 
 MYSQL_PWD="$SINGLESTORE_PASSWORD" "$ENGINE" exec --env MYSQL_PWD "$singlestore_name" \
   memsql -uroot -e "CREATE DATABASE IF NOT EXISTS app"
-MYSQL_PWD="$MYSQL_USER_PASSWORD" "$ENGINE" exec --env MYSQL_PWD "$mysql_name" \
-  mysql -usigil app -Nse "SELECT CURRENT_USER(), @@version" \
-  >"$EVIDENCE/mysql.cache-prime.txt"
+MYSQL_PWD="$MYSQL_ROOT_SECRET" "$ENGINE" exec --env MYSQL_PWD "$mysql_name" \
+  mysql -uroot -e \
+    "CREATE USER 'sigil_native'@'%' IDENTIFIED WITH mysql_native_password BY '$MYSQL_USER_PASSWORD'; GRANT ALL ON app.* TO 'sigil_native'@'%'; FLUSH PRIVILEGES" \
+  >"$EVIDENCE/mysql.native-user-create.txt"
 MYSQL_PWD="$MYSQL_ROOT_SECRET" "$ENGINE" exec --env MYSQL_PWD "$mysql_name" \
   mysql -uroot -Nse \
-    "SELECT user, host, plugin FROM mysql.user WHERE user = 'sigil' ORDER BY host" \
+    "SELECT user, host, plugin FROM mysql.user WHERE user IN ('sigil', 'sigil_native') ORDER BY user, host" \
   >"$EVIDENCE/mysql.auth-plugin.txt"
 grep -F $'sigil\t%\tcaching_sha2_password' "$EVIDENCE/mysql.auth-plugin.txt" >/dev/null
+grep -F $'sigil_native\t%\tmysql_native_password' "$EVIDENCE/mysql.auth-plugin.txt" >/dev/null
 
 singlestore_port="$(published_port "$singlestore_name")"
 mysql_port="$(published_port "$mysql_name")"
@@ -433,17 +436,25 @@ for old, new in replacements.items():
     text = text.replace(old, new)
 path.write_text(text, encoding="utf-8")
 PY
-if [[ "$($SIGIL --version)" == "sigil 0.33.0" ]]; then
-  python3 - "$SCRATCH/package/plugin.toml" <<'PY'
+sigil_version="$($SIGIL --version)"
+scratch_requirement=""
+if [[ "$sigil_version" == "sigil 0.33.0" ]]; then
+  scratch_requirement=">=0.33.0, <1.0.0"
+elif [[ "$sigil_version" == sigil\ *-* ]]; then
+  scratch_requirement="=${sigil_version#sigil }"
+fi
+if [[ -n "$scratch_requirement" ]]; then
+  python3 - "$SCRATCH/package/plugin.toml" "$scratch_requirement" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
+requirement = sys.argv[2]
 text = path.read_text(encoding="utf-8")
 old = 'sigil = ">=0.33.1, <1.0.0"'
 if text.count(old) != 1:
     raise SystemExit("candidate Sigil version floor differs")
-path.write_text(text.replace(old, 'sigil = ">=0.33.0, <1.0.0"'), encoding="utf-8")
+path.write_text(text.replace(old, f'sigil = "{requirement}"'), encoding="utf-8")
 PY
 fi
 "$SIGIL" plugin validate "$SCRATCH/package/plugin.toml" \
@@ -472,8 +483,8 @@ CARGO_TARGET_DIR="$ROOT/target/sigil-compat-seed" \
   cargo run --quiet --locked --offline \
     --manifest-path "$SCRATCH/seeder/Cargo.toml" -- \
     "$SCRATCH/data" \
-    "$SCRATCH/package/dist/mysql-0.2.0.sigil-plugin.tar.zst" \
-    github:conformance/mysql mysql 0.2.0 mysql-live-0.2.0
+    "$SCRATCH/package/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst" \
+    github:conformance/mysql mysql 0.2.1-rc.1 mysql-live-0.2.1-rc.1
 
 cp "$ROOT/conformance/live/sigil.toml" "$SCRATCH/project/.sigil/sigil.toml"
 for scenario in "$ROOT"/conformance/live/*.sigil.lua; do
@@ -483,7 +494,12 @@ done
 run_sigil plugin lock >"$EVIDENCE/plugin.lock.txt"
 
 run_live_scenario singlestore "$singlestore_port" root "$SINGLESTORE_PASSWORD"
-run_live_scenario mysql84 "$mysql_port" sigil "$MYSQL_USER_PASSWORD"
+run_live_scenario mysql80-caching "$mysql_port" sigil "$MYSQL_USER_PASSWORD"
+run_live_scenario mysql80-native "$mysql_port" sigil_native "$MYSQL_USER_PASSWORD"
+MYSQL_PWD="$MYSQL_ROOT_SECRET" "$ENGINE" exec --env MYSQL_PWD "$mysql_name" \
+  mysql -uroot -e "FLUSH PRIVILEGES" \
+  >"$EVIDENCE/mysql.cache-clear.txt"
+run_live_scenario mysql80-caching-after-flush "$mysql_port" sigil "$MYSQL_USER_PASSWORD"
 
 start_fault_peer typed
 run_pass_scenario protocol-faults mysql-protocol-faults.lua \
@@ -580,7 +596,7 @@ set_network_option max_bytes 1KiB 32MiB
 "$ENGINE" logs "$singlestore_name" >"$EVIDENCE/singlestore.log" 2>&1
 "$ENGINE" logs "$mysql_name" >"$EVIDENCE/mysql.log" 2>&1
 printf '%s\n' \
-  "candidate_commit=e9659bb2c4b04d83c63391422867b1eb0c7f0901" \
+  "candidate_commit=$CANDIDATE_COMMIT" \
   "component_sha256=$EXPECTED_COMPONENT_SHA256" \
   "component_blake3=$EXPECTED_COMPONENT_BLAKE3" \
   "package_sha256=$EXPECTED_PACKAGE_SHA256" \

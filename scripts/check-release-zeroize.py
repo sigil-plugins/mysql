@@ -126,7 +126,11 @@ def main() -> None:
                     abort("zeroize call has no length operand")
                 length = re.fullmatch(r"i32.const ([0-9]+)", caller[position - 1].strip())
                 if length is None:
-                    abort("zeroize call does not use a statically auditable digest length")
+                    # Other reachable secret buffers (for example, the
+                    # host-supplied entropy Vec) also use this wipe helper but
+                    # have a runtime length. They are not digest candidates;
+                    # the exact six fixed digest wipes remain required below.
+                    continue
                 lengths.append(int(length.group(1)))
             expected_count = len(next(iter(EXPECTED_DIGEST_WIPE_ORDERS)))
             for start in range(len(lengths) - expected_count + 1):

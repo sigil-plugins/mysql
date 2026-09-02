@@ -2,6 +2,11 @@
 
 use std::cell::RefCell;
 
+use rand_chacha::ChaCha20Rng;
+use rand_core::SeedableRng;
+use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
+use rsa::{Oaep, RsaPublicKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -21,7 +26,7 @@ use bindings::exports::sigil::sql::driver::{
     Cell, Column, ColumnType, CommandResult, ConnectOptions, Connection, Error, ErrorClass, Guest,
     GuestConnection, Row, RowSet, TemporalType,
 };
-use bindings::sigil::host::{net, net_policy, secrets};
+use bindings::sigil::host::{entropy, net, net_policy, secrets};
 use protocol::{
     AuthPlugin, CodecError, RawQueryResult, TypedCell, TypedColumnType, TypedQueryResult,
     TypedResultLimits, TypedRowSet, TypedTemporalType,
@@ -37,6 +42,10 @@ const CLIENT_REQUIRED: u32 = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
 const CLIENT_OPTIONAL: u32 = CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF;
 const MAX_PACKET_PAYLOAD: usize = 1_048_576;
 const MAX_SQL_BYTES: usize = 1_048_575;
+const AUTH_ENTROPY_BYTES: u32 = 32;
+const MAX_RSA_PUBLIC_KEY_BYTES: usize = 16 * 1024;
+const MIN_RSA_PUBLIC_KEY_BITS: usize = 2_048;
+const MAX_RSA_PUBLIC_KEY_BITS: usize = 8_192;
 
 struct Mysql;
 
@@ -235,6 +244,99 @@ fn auth_token(auth_plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Vec<u8>
     }
 }
 
+fn authentication_entropy_seed() -> Result<[u8; AUTH_ENTROPY_BYTES as usize], Error> {
+    let mut bytes = SecretBytes(entropy::bytes(AUTH_ENTROPY_BYTES).map_err(|_error| {
+        driver_error(
+            ErrorClass::Transport,
+            "cryptographic entropy was unavailable",
+        )
+    })?);
+    let seed = bytes
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| map_codec_error(CodecError::Protocol))?;
+    bytes.0.zeroize();
+    Ok(seed)
+}
+
+#[inline(never)]
+fn caching_sha2_rsa_response<F>(
+    password: &[u8],
+    nonce: &[u8],
+    public_key_pem: &[u8],
+    entropy_seed: &mut F,
+) -> Result<SecretBytes, Error>
+where
+    F: FnMut() -> Result<[u8; AUTH_ENTROPY_BYTES as usize], Error>,
+{
+    if nonce.len() != 20 || public_key_pem.len() > MAX_RSA_PUBLIC_KEY_BYTES {
+        return Err(map_codec_error(CodecError::Protocol));
+    }
+    let public_key_text =
+        std::str::from_utf8(public_key_pem).map_err(|_| map_codec_error(CodecError::Protocol))?;
+    let public_key = RsaPublicKey::from_public_key_pem(public_key_text)
+        .map_err(|_| map_codec_error(CodecError::Protocol))?;
+    let bits = public_key.n().bits();
+    if !(MIN_RSA_PUBLIC_KEY_BITS..=MAX_RSA_PUBLIC_KEY_BITS).contains(&bits) {
+        return Err(map_codec_error(CodecError::Unsupported));
+    }
+
+    let mut obfuscated = SecretBytes(password.to_vec());
+    obfuscated.0.push(0);
+    for (index, byte) in obfuscated.0.iter_mut().enumerate() {
+        *byte ^= nonce[index % nonce.len()];
+    }
+    let mut seed = entropy_seed()?;
+    let mut rng = ChaCha20Rng::from_seed(seed);
+    seed.zeroize();
+    let encrypted = public_key
+        .encrypt(&mut rng, Oaep::new::<Sha1>(), &obfuscated.0)
+        .map_err(|_| map_codec_error(CodecError::Protocol))?;
+    Ok(SecretBytes(encrypted))
+}
+
+fn checked_sequence(sequence: u8, increment: u8) -> Result<u8, Error> {
+    sequence
+        .checked_add(increment)
+        .ok_or_else(|| map_codec_error(CodecError::Protocol))
+}
+
+#[inline(never)]
+fn complete_caching_sha2_authentication<F>(
+    stream: &impl MysqlIo,
+    tls_mode: ConnectionTlsMode,
+    password: &[u8],
+    auth_data: &[u8],
+    secret_refs: &[(&str, &[u8])],
+    server_sequence: u8,
+    entropy_seed: &mut F,
+) -> Result<(), Error>
+where
+    F: FnMut() -> Result<[u8; AUTH_ENTROPY_BYTES as usize], Error>,
+{
+    match tls_mode {
+        ConnectionTlsMode::Upgrade => {
+            let mut cleartext = SecretBytes(password.to_vec());
+            cleartext.0.push(0);
+            write_packet(stream, checked_sequence(server_sequence, 1)?, &cleartext.0)?;
+            let complete = read_packet(stream, checked_sequence(server_sequence, 2)?)?;
+            protocol::parse_ok_or_error(&complete, secret_refs, true).map_err(map_codec_error)
+        }
+        ConnectionTlsMode::Disabled => {
+            write_packet(stream, checked_sequence(server_sequence, 1)?, &[0x02])?;
+            let key_packet = read_packet(stream, checked_sequence(server_sequence, 2)?)?;
+            let public_key = protocol::parse_auth_public_key(&key_packet, secret_refs)
+                .map_err(map_codec_error)?;
+            let encrypted =
+                caching_sha2_rsa_response(password, auth_data, public_key, entropy_seed)?;
+            write_packet(stream, checked_sequence(server_sequence, 3)?, &encrypted.0)?;
+            let complete = read_packet(stream, checked_sequence(server_sequence, 4)?)?;
+            protocol::parse_ok_or_error(&complete, secret_refs, true).map_err(map_codec_error)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionTlsMode {
     Disabled,
@@ -249,6 +351,29 @@ fn authenticate_mysql(
     database: Option<&str>,
     secret_refs: &[(&str, &[u8])],
 ) -> Result<(), Error> {
+    authenticate_mysql_with_entropy(
+        stream,
+        tls_mode,
+        username,
+        password,
+        database,
+        secret_refs,
+        authentication_entropy_seed,
+    )
+}
+
+fn authenticate_mysql_with_entropy<F>(
+    stream: &impl MysqlIo,
+    tls_mode: ConnectionTlsMode,
+    username: &[u8],
+    password: &[u8],
+    database: Option<&str>,
+    secret_refs: &[(&str, &[u8])],
+    mut entropy_seed: F,
+) -> Result<(), Error>
+where
+    F: FnMut() -> Result<[u8; AUTH_ENTROPY_BYTES as usize], Error>,
+{
     let handshake_bytes = read_packet(stream, 0)?;
     let handshake = protocol::parse_handshake(&handshake_bytes).map_err(map_codec_error)?;
     let transport_capability = match tls_mode {
@@ -295,29 +420,56 @@ fn authenticate_mysql(
     );
     write_packet(stream, response_sequence, &response.0)?;
 
-    let auth = read_packet(stream, auth_sequence)?;
-    match protocol::parse_auth_response(&auth, secret_refs, handshake.auth_plugin)
-        .map_err(map_codec_error)?
-    {
-        protocol::AuthResponse::Complete => {}
-        protocol::AuthResponse::FastComplete => {
-            let complete = read_packet(stream, auth_sequence.wrapping_add(1))?;
-            protocol::parse_ok_or_error(&complete, secret_refs, true).map_err(map_codec_error)?;
-        }
-        protocol::AuthResponse::FullAuthentication => {
-            if handshake.auth_plugin != AuthPlugin::CachingSha2Password
-                || tls_mode != ConnectionTlsMode::Upgrade
-            {
-                return Err(map_codec_error(CodecError::Unsupported));
+    let mut server_sequence = auth_sequence;
+    let mut auth_plugin = handshake.auth_plugin;
+    let mut auth_data = handshake.auth_data;
+    let mut switched = false;
+    loop {
+        let auth = read_packet(stream, server_sequence)?;
+        match protocol::parse_auth_response(&auth, secret_refs, auth_plugin)
+            .map_err(map_codec_error)?
+        {
+            protocol::AuthResponse::Complete => return Ok(()),
+            protocol::AuthResponse::Switch {
+                plugin,
+                auth_data: switched_auth_data,
+            } => {
+                if switched {
+                    return Err(map_codec_error(CodecError::Unsupported));
+                }
+                switched = true;
+                auth_plugin = plugin;
+                auth_data = switched_auth_data;
+                let switch_token = SecretBytes(auth_token(auth_plugin, password, &auth_data));
+                write_packet(
+                    stream,
+                    checked_sequence(server_sequence, 1)?,
+                    &switch_token.0,
+                )?;
+                server_sequence = checked_sequence(server_sequence, 2)?;
             }
-            let mut cleartext = SecretBytes(password.to_vec());
-            cleartext.0.push(0);
-            write_packet(stream, auth_sequence.wrapping_add(1), &cleartext.0)?;
-            let complete = read_packet(stream, auth_sequence.wrapping_add(2))?;
-            protocol::parse_ok_or_error(&complete, secret_refs, true).map_err(map_codec_error)?;
+            protocol::AuthResponse::FastComplete => {
+                let complete = read_packet(stream, checked_sequence(server_sequence, 1)?)?;
+                protocol::parse_ok_or_error(&complete, secret_refs, true)
+                    .map_err(map_codec_error)?;
+                return Ok(());
+            }
+            protocol::AuthResponse::FullAuthentication => {
+                if auth_plugin != AuthPlugin::CachingSha2Password {
+                    return Err(map_codec_error(CodecError::Unsupported));
+                }
+                return complete_caching_sha2_authentication(
+                    stream,
+                    tls_mode,
+                    password,
+                    &auth_data,
+                    secret_refs,
+                    server_sequence,
+                    &mut entropy_seed,
+                );
+            }
         }
     }
-    Ok(())
 }
 
 fn validate_connect_options(options: &ConnectOptions) -> Result<(), Error> {
@@ -340,6 +492,7 @@ fn validate_connect_options(options: &ConnectOptions) -> Result<(), Error> {
     Ok(())
 }
 
+#[inline(never)]
 fn connect_mysql(options: ConnectOptions) -> Result<MysqlConnection, Error> {
     validate_connect_options(&options)?;
     let limits = TypedResultLimits {
@@ -615,11 +768,14 @@ mod export {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs8::{EncodePublicKey, LineEnding};
     use std::cell::Cell as CounterCell;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpStream};
     use std::rc::Rc;
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     struct ScriptedIo {
@@ -765,13 +921,48 @@ mod tests {
         )
     }
 
-    fn mysql_8_4_greeting() -> Vec<u8> {
+    fn mysql_8_greeting() -> Vec<u8> {
         greeting(
-            b"8.4.0",
+            b"8.0.29",
             CLIENT_REQUIRED | CLIENT_SSL | CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF,
             b"0123456789abcdefghij",
             b"caching_sha2_password",
         )
+    }
+
+    fn auth_switch(plugin: &[u8], nonce: &[u8; 20]) -> Vec<u8> {
+        let mut packet = vec![0xfe];
+        packet.extend_from_slice(plugin);
+        packet.push(0);
+        packet.extend_from_slice(nonce);
+        packet.push(0);
+        packet
+    }
+
+    fn authentication_error(message: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0xff, 0x15, 0x04, b'#'];
+        packet.extend_from_slice(b"28000");
+        packet.extend_from_slice(message);
+        packet
+    }
+
+    fn rsa_test_key() -> &'static RsaPrivateKey {
+        static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
+        KEY.get_or_init(|| {
+            let mut rng = ChaCha20Rng::from_seed([0x5a; 32]);
+            RsaPrivateKey::new(&mut rng, MIN_RSA_PUBLIC_KEY_BITS)
+                .expect("deterministic RSA test key")
+        })
+    }
+
+    fn rsa_public_key_packet() -> Vec<u8> {
+        let public_key = rsa_test_key()
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("encode RSA test public key");
+        let mut packet = vec![0x01];
+        packet.extend_from_slice(public_key.as_bytes());
+        packet
     }
 
     const AUTH_OK: &[u8] = &[0x00, 0, 0, 0, 0, 0, 0];
@@ -1009,15 +1200,14 @@ mod tests {
     }
 
     #[test]
-    fn scripted_auth_rejects_sequence_drift_bad_credentials_and_switches() {
+    fn scripted_auth_rejects_sequence_drift_and_retains_bad_credentials() {
         let greeting = singlestore_greeting();
         let wrong_sequence = ScriptedIo::new(&[(0, &greeting), (3, AUTH_OK)]);
         let error = authenticate_script(&wrong_sequence, ConnectionTlsMode::Disabled)
             .expect_err("plaintext auth result must be sequence 2");
         assert_eq!(error.class, ErrorClass::Protocol);
 
-        let mut denied = vec![0xff, 0x15, 0x04, b'#'];
-        denied.extend_from_slice(b"28000Access denied for secret");
+        let denied = authentication_error(b"Access denied for secret");
         let bad_credentials = ScriptedIo::new(&[(0, &greeting), (2, &denied)]);
         let error = authenticate_script(&bad_credentials, ConnectionTlsMode::Disabled)
             .expect_err("bad credentials remain typed authentication");
@@ -1025,20 +1215,48 @@ mod tests {
         assert_eq!(error.vendor_code, Some(1045));
         assert_eq!(error.sqlstate.as_deref(), Some("28000"));
         assert_eq!(error.message, "Access denied for [REDACTED]");
+    }
 
-        let auth_switch = b"\xfecaching_sha2_password\0hostile-challenge";
-        let switched = ScriptedIo::new(&[(0, &greeting), (2, auth_switch)]);
-        let error = authenticate_script(&switched, ConnectionTlsMode::Disabled)
-            .expect_err("auth switches fail closed");
+    #[test]
+    fn scripted_auth_switches_to_native_and_retains_bad_credentials() {
+        let greeting = mysql_8_greeting();
+        let switched_nonce = b"abcdefghijklmnopqrst";
+        let switch = auth_switch(b"mysql_native_password", switched_nonce);
+        let accepted = ScriptedIo::new(&[(0, &greeting), (2, &switch), (4, AUTH_OK)]);
+        authenticate_script(&accepted, ConnectionTlsMode::Disabled)
+            .expect("auth switch to mysql_native_password");
+        let writes = accepted.writes.borrow();
+        assert_eq!(writes.len(), 4);
+        assert_eq!(writes[2][3], 3, "auth-switch response sequence");
+        assert_eq!(
+            writes[3],
+            mysql_native_password_token(b"secret", switched_nonce)
+        );
+        drop(writes);
+
+        let denied = authentication_error(b"Access denied for root");
+        let bad_credentials = ScriptedIo::new(&[(0, &greeting), (2, &switch), (4, &denied)]);
+        let error = authenticate_script(&bad_credentials, ConnectionTlsMode::Disabled)
+            .expect_err("switched bad credentials remain typed authentication");
+        assert_eq!(error.class, ErrorClass::Authentication);
+        assert_eq!(error.vendor_code, Some(1045));
+        assert_eq!(error.sqlstate.as_deref(), Some("28000"));
+        assert_eq!(error.message, "Access denied for [REDACTED]");
+
+        let second_nonce = b"tsrqponmlkjihgfedcba";
+        let second_switch = auth_switch(b"caching_sha2_password", second_nonce);
+        let repeated = ScriptedIo::new(&[(0, &greeting), (2, &switch), (4, &second_switch)]);
+        let error = authenticate_script(&repeated, ConnectionTlsMode::Disabled)
+            .expect_err("a second auth switch fails closed");
         assert_eq!(error.class, ErrorClass::Unsupported);
     }
 
     #[test]
-    fn scripted_mysql_8_4_caching_auth_preserves_tls_continuations() {
-        let greeting = mysql_8_4_greeting();
+    fn scripted_mysql_8_caching_auth_preserves_tls_continuations() {
+        let greeting = mysql_8_greeting();
         let fast = ScriptedIo::new(&[(0, &greeting), (3, &[0x01, 0x03]), (4, AUTH_OK)]);
         authenticate_script(&fast, ConnectionTlsMode::Upgrade)
-            .expect("MySQL 8.4 fast authentication");
+            .expect("MySQL 8 fast authentication");
         let writes = fast.writes.borrow();
         assert_eq!(writes.len(), 4);
         assert_eq!(writes[0][3], 1);
@@ -1047,12 +1265,146 @@ mod tests {
         assert_eq!(fast.upgrades.get(), 1);
         drop(writes);
 
-        let full_without_tls = ScriptedIo::new(&[(0, &greeting), (2, &[0x01, 0x04])]);
-        let error = authenticate_script(&full_without_tls, ConnectionTlsMode::Disabled)
-            .expect_err("cleartext password must never be sent without host TLS");
-        assert_eq!(error.class, ErrorClass::Unsupported);
-        assert_eq!(full_without_tls.writes.borrow().len(), 2);
-        assert_eq!(full_without_tls.upgrades.get(), 0);
+        let full = ScriptedIo::new(&[(0, &greeting), (3, &[0x01, 0x04]), (5, AUTH_OK)]);
+        authenticate_script(&full, ConnectionTlsMode::Upgrade)
+            .expect("MySQL 8 full authentication inside verified TLS");
+        let writes = full.writes.borrow();
+        assert_eq!(writes.len(), 6);
+        assert_eq!(writes[4][3], 4, "full-auth password sequence");
+        assert_eq!(writes[5], b"secret\0");
+        assert_eq!(full.upgrades.get(), 1);
+    }
+
+    #[test]
+    fn scripted_mysql_8_cold_cache_uses_rsa_oaep_and_retains_authentication_errors() {
+        let greeting = mysql_8_greeting();
+        let public_key_packet = rsa_public_key_packet();
+        let accepted = ScriptedIo::new(&[
+            (0, &greeting),
+            (2, &[0x01, 0x04]),
+            (4, &public_key_packet),
+            (6, AUTH_OK),
+        ]);
+        let entropy_calls = CounterCell::new(0);
+        authenticate_mysql_with_entropy(
+            &accepted,
+            ConnectionTlsMode::Disabled,
+            b"root",
+            b"secret",
+            Some("app"),
+            &[("username", b"root"), ("password", b"secret")],
+            || {
+                entropy_calls.set(entropy_calls.get() + 1);
+                Ok([0xa5; AUTH_ENTROPY_BYTES as usize])
+            },
+        )
+        .expect("cold caching_sha2_password authentication");
+        assert_eq!(entropy_calls.get(), 1);
+        let writes = accepted.writes.borrow();
+        assert_eq!(writes.len(), 6);
+        assert_eq!(writes[2][3], 3, "public-key request sequence");
+        assert_eq!(writes[3], [0x02]);
+        assert_eq!(writes[4][3], 5, "encrypted response sequence");
+        let mut cleartext = rsa_test_key()
+            .decrypt(Oaep::new::<Sha1>(), &writes[5])
+            .expect("decrypt deterministic OAEP response");
+        for (index, byte) in cleartext.iter_mut().enumerate() {
+            *byte ^= b"0123456789abcdefghij"[index % 20];
+        }
+        assert_eq!(cleartext, b"secret\0");
+        cleartext.zeroize();
+        assert!(writes.iter().all(|write| {
+            !write
+                .windows(b"secret".len())
+                .any(|window| window == b"secret")
+        }));
+        drop(writes);
+
+        let denied = authentication_error(b"Access denied for root");
+        let bad_credentials = ScriptedIo::new(&[
+            (0, &greeting),
+            (2, &[0x01, 0x04]),
+            (4, &public_key_packet),
+            (6, &denied),
+        ]);
+        let error = authenticate_mysql_with_entropy(
+            &bad_credentials,
+            ConnectionTlsMode::Disabled,
+            b"root",
+            b"wrong-password",
+            Some("app"),
+            &[("username", b"root"), ("password", b"wrong-password")],
+            || Ok([0x3c; AUTH_ENTROPY_BYTES as usize]),
+        )
+        .expect_err("cold-cache wrong password remains typed authentication");
+        assert_eq!(error.class, ErrorClass::Authentication);
+        assert_eq!(error.vendor_code, Some(1045));
+        assert_eq!(error.sqlstate.as_deref(), Some("28000"));
+        assert_eq!(error.message, "Access denied for [REDACTED]");
+    }
+
+    #[test]
+    fn scripted_mysql_8_cold_cache_rejects_bad_keys_and_missing_entropy_without_plaintext() {
+        let greeting = mysql_8_greeting();
+        let malformed_key = b"\x01not a PEM public key";
+        let malformed = ScriptedIo::new(&[(0, &greeting), (2, &[0x01, 0x04]), (4, malformed_key)]);
+        let entropy_calls = CounterCell::new(0);
+        let error = authenticate_mysql_with_entropy(
+            &malformed,
+            ConnectionTlsMode::Disabled,
+            b"root",
+            b"secret",
+            Some("app"),
+            &[("username", b"root"), ("password", b"secret")],
+            || {
+                entropy_calls.set(entropy_calls.get() + 1);
+                Ok([0x11; AUTH_ENTROPY_BYTES as usize])
+            },
+        )
+        .expect_err("malformed server public key fails closed");
+        assert_eq!(error.class, ErrorClass::Protocol);
+        assert_eq!(entropy_calls.get(), 0);
+        assert_eq!(malformed.writes.borrow().len(), 4);
+
+        let public_key_packet = rsa_public_key_packet();
+        let unavailable =
+            ScriptedIo::new(&[(0, &greeting), (2, &[0x01, 0x04]), (4, &public_key_packet)]);
+        let error = authenticate_mysql_with_entropy(
+            &unavailable,
+            ConnectionTlsMode::Disabled,
+            b"root",
+            b"secret",
+            Some("app"),
+            &[("username", b"root"), ("password", b"secret")],
+            || {
+                Err(driver_error(
+                    ErrorClass::Transport,
+                    "cryptographic entropy was unavailable",
+                ))
+            },
+        )
+        .expect_err("missing cryptographic entropy fails closed");
+        assert_eq!(error.class, ErrorClass::Transport);
+        assert_eq!(error.message, "cryptographic entropy was unavailable");
+        let writes = unavailable.writes.borrow();
+        assert_eq!(writes.len(), 4, "no encrypted packet was written");
+        assert!(writes.iter().all(|write| {
+            !write
+                .windows(b"secret".len())
+                .any(|window| window == b"secret")
+        }));
+
+        let mut oversized_key = vec![b'a'; MAX_RSA_PUBLIC_KEY_BYTES + 1];
+        let Err(error) = caching_sha2_rsa_response(
+            b"secret",
+            b"0123456789abcdefghij",
+            &oversized_key,
+            &mut || Ok([0x11; AUTH_ENTROPY_BYTES as usize]),
+        ) else {
+            panic!("oversized public key must fail before parsing or entropy");
+        };
+        assert_eq!(error.class, ErrorClass::Protocol);
+        oversized_key.zeroize();
     }
 
     #[test]
@@ -1577,7 +1929,7 @@ mod tests {
     fn candidate_names_exact_sql_v02_and_requires_a_compatible_sigil() {
         let manifest = include_str!("../plugin.toml");
 
-        assert!(manifest.contains("version = \"0.2.0\""));
+        assert!(manifest.contains("version = \"0.2.1-rc.1\""));
         assert!(manifest.contains("entrypoint = \"sigil:sql/driver@0.2.0\""));
         assert!(!manifest.contains("entrypoint = \"sigil:sql/driver@0.1.0\""));
         assert!(manifest.contains("sigil = \">=0.33.1, <1.0.0\""));

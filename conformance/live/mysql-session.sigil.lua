@@ -29,22 +29,14 @@ return {
   run = function()
     local mysql = require("wasm.mysql")
     local dialect = sigil.env("MYSQL_DIALECT")
-    expect(dialect == "singlestore" or dialect == "mysql84")
+    local stock_mysql = dialect:match("^mysql80") ~= nil
+    expect(dialect == "singlestore" or stock_mysql)
 
     local rejected, auth_err = connect(mysql, "MYSQL_BAD_PASSWORD")
     expect(rejected == nil)
-    if dialect == "mysql84" then
-      -- The lane-less route is intentionally plaintext. A wrong
-      -- caching_sha2_password token requests full authentication, which this
-      -- driver must refuse rather than transmit a password without TLS.
-      expect(auth_err.class == "unsupported")
-      expect(auth_err["vendor-code"] == nil)
-      expect(auth_err.sqlstate == nil)
-    else
-      expect(auth_err.class == "authentication")
-      expect(auth_err["vendor-code"] == 1045)
-      expect(auth_err.sqlstate == "28000")
-    end
+    expect(auth_err.class == "authentication")
+    expect(auth_err["vendor-code"] == 1045)
+    expect(auth_err.sqlstate == "28000")
 
     local session, connect_err = connect(mysql, "MYSQL_PASSWORD")
     expect(session ~= nil, connect_err and connect_err.message)
@@ -120,7 +112,7 @@ return {
     )
     expect(warned ~= nil, warned_err and warned_err.message)
     expect(warned["affected-rows"] == 1)
-    if dialect == "mysql84" then
+    if stock_mysql then
       expect(warned.warnings == 1)
     else
       expect(warned.warnings == 0)

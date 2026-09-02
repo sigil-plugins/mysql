@@ -5,7 +5,7 @@ root="$(pwd -P)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 python="${PYTHON:-python3}"
 version="$("$python" -c 'import tomllib; print(tomllib.load(open("plugin.toml", "rb"))["version"])')"
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
   echo "plugin.toml version is not canonical SemVer" >&2
   exit 1
 fi
