@@ -93,7 +93,31 @@ jobs:
           RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          is_prerelease="$(python3 -I - "$VERSION" <<'PY'
+          import re
+          import sys
+
+          version = sys.argv[1]
+          match = re.fullmatch(
+              r"(0|[1-9][0-9]*)\."
+              r"(0|[1-9][0-9]*)\."
+              r"(0|[1-9][0-9]*)"
+              r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+              version,
+          )
+          if match is None:
+              raise SystemExit("version is not canonical SemVer")
+          prerelease = match.group(4)
+          if prerelease is not None:
+              for identifier in prerelease.split("."):
+                  if identifier.isdigit() and len(identifier) > 1 and identifier[0] == "0":
+                      raise SystemExit(
+                          "numeric prerelease identifiers must not contain leading zeroes"
+                      )
+          print("true" if prerelease is not None else "false")
+          PY
+          )"
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -142,8 +166,11 @@ jobs:
           ).encode("ascii")
           assert raw == canonical
           PY
-          echo "package_name=$package" >> "$GITHUB_OUTPUT"
-          echo "subject_digest=sha256:$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
+          {
+            echo "package_name=$package"
+            echo "subject_digest=sha256:$PACKAGE_SHA256"
+            echo "is_prerelease=$is_prerelease"
+          } >> "$GITHUB_OUTPUT"
       - name: Stage and read back the exact draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -153,6 +180,7 @@ jobs:
           CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
           RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          IS_PRERELEASE: ${{ steps.release.outputs.is_prerelease }}
         run: |
           set -euo pipefail
           tag="v${VERSION}"
@@ -171,16 +199,24 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/attestations/sha256:${PACKAGE_SHA256}?predicate_type=provenance&per_page=30")"
           test "$status" = 404
+          release_kind=()
+          if test "$IS_PRERELEASE" = true; then
+            release_kind+=(--prerelease)
+          else
+            test "$IS_PRERELEASE" = false
+          fi
           gh release create "$tag" \
             --target "$SOURCE_COMMIT" \
             --title "${PACKAGE_NAME%.sigil-plugin.tar.zst}" \
             --notes "Immutable keyless-provenance Sigil plugin ${VERSION}." \
             --draft \
+            "${release_kind[@]}" \
             "dist/$PACKAGE_NAME" dist/SHA256SUMS dist/release-manifest.json
           release_json="$(mktemp)"
           gh release view "$tag" --json isDraft,isPrerelease,targetCommitish,assets > "$release_json"
-          jq -e --arg commit "$SOURCE_COMMIT" --arg package "$PACKAGE_NAME" '
-            .isDraft == true and .isPrerelease == false and .targetCommitish == $commit and
+          jq -e --arg commit "$SOURCE_COMMIT" --arg package "$PACKAGE_NAME" \
+            --argjson prerelease "$IS_PRERELEASE" '
+            .isDraft == true and .isPrerelease == $prerelease and .targetCommitish == $commit and
             ([.assets[].name] | sort) == (["SHA256SUMS", "release-manifest.json", $package] | sort)
           ' "$release_json" >/dev/null
           readback="$(mktemp -d)"
@@ -207,6 +243,7 @@ jobs:
           CHECKSUMS_SHA256: ${{ inputs.checksums_sha256 }}
           RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          IS_PRERELEASE: ${{ steps.release.outputs.is_prerelease }}
           ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: |
@@ -233,8 +270,11 @@ jobs:
           done
           test "$attestation_found" = true
           tag="v${VERSION}"
-          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq '.isDraft')" = true
-          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq '.targetCommitish')" = "$SOURCE_COMMIT"
+          release_json="$(mktemp)"
+          gh release view "$tag" --json isDraft,isPrerelease,targetCommitish > "$release_json"
+          jq -e --arg commit "$SOURCE_COMMIT" --argjson prerelease "$IS_PRERELEASE" '
+            .isDraft == true and .isPrerelease == $prerelease and .targetCommitish == $commit
+          ' "$release_json" >/dev/null
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
             echo "tag appeared after preflight; ${tag} is burned" >&2
             exit 1
@@ -253,7 +293,11 @@ jobs:
             sleep 5
           done
           test "$immutable" = true
-          test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = false
+          release_json="$(mktemp)"
+          gh release view "$tag" --json isDraft,isPrerelease,targetCommitish > "$release_json"
+          jq -e --arg commit "$SOURCE_COMMIT" --argjson prerelease "$IS_PRERELEASE" '
+            .isDraft == false and .isPrerelease == $prerelease and .targetCommitish == $commit
+          ' "$release_json" >/dev/null
           readback="$(mktemp -d)"
           gh release download "$tag" --dir "$readback"
           test "$(find "$readback" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3

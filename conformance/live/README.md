@@ -7,19 +7,19 @@ rootless Podman or Docker runner on Linux and never publishes an artifact.
 ## Exact inputs
 
 - Candidate commit:
-  `e9659bb2c4b04d83c63391422867b1eb0c7f0901`
+  `cc4dab15d66b760d507fb3214d0b75bb6618a9b6`
 - `plugin.wasm` SHA-256:
-  `571501479e22ba02b47adb8e61b51006ca4d70200a6fb518db0a18e80cce80d3`
+  `9ece6ea3e5fc2f176a0059d41b8d233528ee17482202c8c1e9727fb1e44e698c`
 - `plugin.wasm` BLAKE3:
-  `d876478d14a9b1c89fff63ea54ed31cc3d225dfe04476c409fd02eed2c1585bf`
-- `dist/mysql-0.2.0.sigil-plugin.tar.zst` SHA-256:
-  `47e039e312b2ada199a6fa47a30a1c9f9bdb99f1891bc5ef7b11cfbc85b37bdd`
-- `dist/mysql-0.2.0.sigil-plugin.tar.zst` BLAKE3:
-  `b95ae75bb3f6384d04a1f3127a568972ac2f6d462a0ae0e3715ff749aed93fd9`
+  `5abf00e529047497e70d76cd210b7dd6774024e17303624320d89ac20f2c33fe`
+- `dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst` SHA-256:
+  `ccbee61486021a05d8e692c8010eef77dccc04c8cc4782e2b03b82734a9f8459`
+- `dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst` BLAKE3:
+  `dc06c86d498c256cab7ebadfac294a77d2b87aa3fa71d2ee4244f5dd4499d204`
 - SingleStoreDB Dev 0.2.35 Linux/amd64 manifest:
   `ghcr.io/singlestore-labs/singlestoredb-dev@sha256:603b0ac0c7992becab334534a3ec1b37bac1a630b3e09cb50369fa222c72c269`
-- MySQL 8.4.6 Linux/amd64 manifest:
-  `docker.io/library/mysql@sha256:c296d65ee6ab3ce2f608c1d1b2bdd3c08b087a5834101d76a6db2e00875216cc`
+- MySQL 8.0.29 Linux/amd64 manifest:
+  `docker.io/library/mysql@sha256:44f98f4dd825a945d2a6a4b7b2f14127b5d07c5aaa07d9d232c2b58936fb76dc`
 
 The script rejects changed candidate digests before starting either service.
 It runs SingleStore with four CPUs because that image's free license rejects a
@@ -48,15 +48,18 @@ for it in the exit trap. `KEEP_LIVE_SCRATCH=1` retains the temporary Sigil
 project for diagnosis; it does not retain service state.
 
 Sigil 0.33.0 already contains the SQL 0.2 host contract but predates this
-candidate's declared 0.33.1 floor. For that one version only, the harness
-lowers the floor in a scratch manifest so it can exercise the production host.
-The candidate component and package are hashed before that scratch operation,
-and neither checked-in artifact is changed.
+candidate's declared 0.33.1 floor. The harness lowers that floor only in a
+scratch manifest when testing 0.33.0. SemVer excludes prereleases from a stable
+lower-bound comparator, so the harness similarly pins a supplied prerelease
+binary's exact version in scratch. The candidate component and package are
+hashed before either operation, and neither checked-in artifact is changed.
 
 ## Matrix
 
-The real services cover the advertised `mysql_native_password` and
-`caching_sha2_password` handshakes, successful authentication, database
+The real services cover SingleStore's initial `mysql_native_password` greeting
+and three stock MySQL 8.0.29 paths: a cold `caching_sha2_password` cache, an
+auth switch to a `mysql_native_password` user, and another cold caching login
+after `FLUSH PRIVILEGES`. Each path proves successful authentication, database
 selection, repeated `query` and `exec` calls on one session, temporary-table
 continuity and fresh-session isolation, typed signed/unsigned integers,
 decimal, finite floating point, SQL NULL, UTF-8 text, bytes, temporal lexemes,
@@ -65,12 +68,13 @@ last-insert ID, warnings, vendor code and SQLSTATE, a nonterminal server error,
 a delayed first response under a longer deadline, caller row/result-byte
 ceilings, the fixed packet ceiling, idempotent close, and resource reuse.
 
-SingleStore returns a typed `authentication` error with vendor code 1045 and
-SQLSTATE 28000 for a bad native-password response. On the deliberately
-plaintext MySQL lane, a bad `caching_sha2_password` token requests full
-authentication; the component returns `unsupported` rather than transmitting
-the password without TLS. Correct credentials use the cache-primed fast-auth
-path.
+Every dialect and authentication plugin returns a typed `authentication` error
+with vendor code 1045 and SQLSTATE 28000 for a wrong password. On the
+deliberately plaintext MySQL lane, cold `caching_sha2_password` authentication
+requests the server public key and sends an RSA-OAEP ciphertext seeded by the
+explicit entropy grant; no cache-prime login is performed. The native MySQL
+user proves the server-directed auth-switch response rather than only an
+initial native greeting.
 
 Separate scenarios prove a one-second operator timeout, socket-loss
 `transport`, malformed metadata `protocol`, invalid integer `encoding`, and

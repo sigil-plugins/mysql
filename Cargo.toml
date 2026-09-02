@@ -1,6 +1,6 @@
 [package]
 name = "sigil-plugin-mysql"
-version = "0.2.0"
+version = "0.2.1-rc.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.95"
@@ -9,6 +9,9 @@ rust-version = "1.95"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rand_chacha = { version = "0.3.1", default-features = false }
+rand_core = { version = "0.6.4", default-features = false }
+rsa = { version = "0.9.8", default-features = false, features = ["pem", "u64_digit"] }
 sha1 = { version = "0.10.6", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
 wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc"] }

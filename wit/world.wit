@@ -4,5 +4,6 @@ world mysql {
     import sigil:host/net@1.0.0;
     import sigil:host/net-policy@1.0.0;
     import sigil:host/secrets@1.0.0;
+    import sigil:host/entropy@1.0.0;
     export sigil:sql/driver@0.2.0;
 }

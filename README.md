@@ -3,7 +3,8 @@
 `wasm.mysql` is Sigil's bounded MySQL and SingleStore protocol component. It
 exports the exact experimental `sigil:sql/driver@0.2.0` interface and imports
 only `sigil:host/net@1.0.0`, its read-only `net-policy` companion, its value
-types, and `sigil:host/secrets@1.0.0`.
+types, `sigil:host/secrets@1.0.0`, and the separately granted
+`sigil:host/entropy@1.0.0` surface used for RSA-OAEP padding.
 
 Sigil owns endpoint resolution, TCP, TLS verification, timeouts, byte quotas,
 secret grants, cancellation, and teardown. The component implements MySQL
@@ -12,18 +13,30 @@ negotiation, `caching_sha2_password`, `mysql_native_password`, and stateful,
 single-result `COM_QUERY`. One returned connection resource is one server
 session, so temporary tables and other session state survive alternating
 `exec` and `query` calls. It never receives a raw host, port, DNS, socket, TLS
-name, trust root, clock, filesystem, process, stdio, or ambient WASI capability.
+name, trust root, clock, filesystem, process, stdio, ambient randomness, or
+ambient WASI capability.
 
 The driver reads only the frozen TLS mode for its granted logical endpoint.
 For `tls = "upgrade"`, it requires the server's SSL capability, sends the MySQL
 SSLRequest, and asks Sigil to verify and upgrade the stream before credentials.
-For explicit deploy-local `tls = "disabled"`, it omits SSLRequest and may use
-the challenge-response `mysql_native_password` exchange without sending the
-password itself. It rejects `tls = "direct"`, unknown routes, auth switches,
-and any cleartext `caching_sha2_password` full-auth request. A server flag can
-never downgrade an operator-required TLS upgrade. Disabled mode provides no
-transport confidentiality and is appropriate only for Sigil's explicitly
-permitted deploy-local routes.
+For explicit deploy-local `tls = "disabled"`, it omits SSLRequest and supports
+the challenge-response `mysql_native_password` exchange. A cold
+`caching_sha2_password` cache triggers MySQL's public-key exchange: the
+component requests the server key and sends the nonce-obfuscated password in
+RSA-OAEP ciphertext, seeded from exactly 32 bytes of explicitly granted host
+entropy. With `tls = "upgrade"`, full authentication instead sends the
+NUL-terminated password only inside the host-verified TLS stream. One
+server-directed switch between the two supported authentication plugins is
+accepted; unknown or repeated switches fail closed.
+
+It rejects `tls = "direct"` and unknown routes. A server flag can never
+downgrade an operator-required TLS upgrade. Disabled mode provides no transport
+confidentiality, and a server key requested over that unauthenticated stream
+does not itself prevent an active interception attack. That mode is appropriate
+only for Sigil's explicitly permitted deploy-local routes; use verified TLS for
+an untrusted network. The entropy call occurs only on the cold, unencrypted
+`caching_sha2_password` path and marks that run best-effort replayable. Native,
+fast-cache, and TLS authentication do not call entropy.
 
 Password-derived SHA-1 and SHA-256 digest intermediates use optimizer-resistant
 zeroization. The release gate inspects the optimized core Wasm and requires all
@@ -84,12 +97,21 @@ Its deterministic fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting,
 the existing MySQL 8.4 `caching_sha2_password` path, repeated calls on one
 session, typed boundary values, exact command metadata, and fail-closed limits.
 
-| Public 0.1.2 | Public stable 0.2.0 |
+Version 0.2.1-rc.1 is an unpublished source candidate. It adds one bounded auth
+switch plus complete cold-cache `caching_sha2_password` authentication for
+stock MySQL 8, including typed 1045/28000 failures for wrong credentials. It
+requires Sigil 0.33.1 or newer and an entropy grant only when the unencrypted
+cold-cache exchange is possible. Do not add `mysql@0.2.1-rc.1` to a project
+lock until a separately authorized prerelease is published and verified.
+Its fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting, MySQL 8.0.29
+fast, TLS-full, RSA-full, and auth-switch paths, repeated calls on one session,
+typed boundary values, exact command metadata, and fail-closed limits.
+
+| Public 0.2.0 | Unpublished 0.2.1-rc.1 source candidate |
 |---|---|
-| `query` returns a row-or-command variant | row-only `query` plus command-only `exec` |
-| NULL, text, and bytes cells | tagged signed, unsigned, floating, exact decimal, temporal, text, bytes, and NULL |
-| fixed result ceilings | `max-rows` and `max-result-bytes` may lower, never raise, fixed and host ceilings |
-| MySQL 8.4 `caching_sha2_password` | also supports SingleStore's MySQL 5.7 dialect and `mysql_native_password` |
+| SingleStore native auth and warm-cache MySQL 8 auth | also handles `mysql_native_password` auth switches and cold `caching_sha2_password` caches |
+| unsupported on cold-cache and switched login failures | returns the server's typed authentication error, including 1045/28000 |
+| no entropy capability | explicit 32-byte host entropy only for RSA-OAEP padding on the cold plaintext lane |
 
 ## Lua shape
 

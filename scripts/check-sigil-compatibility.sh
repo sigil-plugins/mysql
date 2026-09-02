@@ -74,18 +74,25 @@ PY
 # its unreleased development binary still identifies itself as 0.33.0. Lower
 # only the scratch package's host-version declaration in that exact case. The
 # source manifest remains >=0.33.1 and its exact value is separately asserted.
-if [[ "$($SIGIL --version)" == "sigil 0.33.0" ]]; then
-  python3 - "$SCRATCH/package/plugin.toml" <<'PY'
+sigil_version="$($SIGIL --version)"
+scratch_requirement=""
+if [[ "$sigil_version" == "sigil 0.33.0" ]]; then
+  scratch_requirement=">=0.33.0, <1.0.0"
+elif [[ "$sigil_version" == sigil\ *-* ]]; then
+  scratch_requirement="=${sigil_version#sigil }"
+fi
+if [[ -n "$scratch_requirement" ]]; then
+  python3 - "$SCRATCH/package/plugin.toml" "$scratch_requirement" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
+requirement = sys.argv[2]
 text = path.read_text(encoding="utf-8")
 old = 'sigil = ">=0.33.1, <1.0.0"'
-new = 'sigil = ">=0.33.0, <1.0.0"'
 if text.count(old) != 1:
     raise SystemExit("candidate Sigil version floor differs")
-path.write_text(text.replace(old, new), encoding="utf-8")
+path.write_text(text.replace(old, f'sigil = "{requirement}"'), encoding="utf-8")
 PY
 fi
 
@@ -94,11 +101,11 @@ grep -F 'sigil = ">=0.33.1, <1.0.0"' "$ROOT/plugin.toml" >/dev/null
 "$SIGIL" plugin inspect "$SCRATCH/package/plugin.toml" >"$SCRATCH/inspect.txt"
 grep -F 'sigil:sql/driver@0.2.0' "$SCRATCH/inspect.txt" >/dev/null
 grep -F '[method]connection.exec' "$SCRATCH/inspect.txt" >/dev/null
-grep -F 'requested capabilities: network, secrets' "$SCRATCH/inspect.txt" >/dev/null
+grep -F 'requested capabilities: network, secrets, entropy' "$SCRATCH/inspect.txt" >/dev/null
 
 "$SIGIL" plugin pack "$SCRATCH/package/plugin.toml" \
   --output-dir "$SCRATCH/package/dist"
-archive="$SCRATCH/package/dist/mysql-0.2.0.sigil-plugin.tar.zst"
+archive="$SCRATCH/package/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst"
 test -f "$archive"
 "$SIGIL" plugin validate "$archive"
 
@@ -121,7 +128,7 @@ cargo generate-lockfile --quiet --manifest-path "$SCRATCH/seeder/Cargo.toml" --o
 CARGO_TARGET_DIR="$ROOT/target/sigil-compat-seed" \
   cargo run --quiet --locked --offline \
     --manifest-path "$SCRATCH/seeder/Cargo.toml" -- \
-    "$SCRATCH/data" "$archive" "$SOURCE" mysql 0.2.0 mysql-conformance-0.2.0
+    "$SCRATCH/data" "$archive" "$SOURCE" mysql 0.2.1-rc.1 mysql-conformance-0.2.1-rc.1
 
 mkdir -p "$SCRATCH/project/.sigil" "$SCRATCH/project/scenarios"
 cp "$ROOT/conformance/sigil.toml" "$SCRATCH/project/.sigil/sigil.toml"

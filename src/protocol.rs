@@ -85,11 +85,15 @@ impl AuthPlugin {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthResponse {
     Complete,
     FastComplete,
     FullAuthentication,
+    Switch {
+        plugin: AuthPlugin,
+        auth_data: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,7 +598,39 @@ pub fn parse_auth_response(
         [0x01, 0x04] if auth_plugin == AuthPlugin::CachingSha2Password => {
             Ok(AuthResponse::FullAuthentication)
         }
-        [0x01 | 0xfe, ..] => Err(CodecError::Unsupported),
+        [0xfe, ..] => parse_auth_switch_request(payload),
+        [0x01, ..] => Err(CodecError::Unsupported),
+        _ => Err(CodecError::Protocol),
+    }
+}
+
+fn parse_auth_switch_request(payload: &[u8]) -> Result<AuthResponse, CodecError> {
+    let mut cursor = Cursor::new(payload);
+    if cursor.u8()? != 0xfe {
+        return Err(CodecError::Protocol);
+    }
+    let plugin = match cursor.nul_bytes()? {
+        b"caching_sha2_password" => AuthPlugin::CachingSha2Password,
+        b"mysql_native_password" => AuthPlugin::MysqlNativePassword,
+        _ => return Err(CodecError::Unsupported),
+    };
+    let mut auth_data = cursor.remaining().to_vec();
+    if auth_data.last() == Some(&0) {
+        auth_data.pop();
+    }
+    if auth_data.len() != 20 {
+        return Err(CodecError::Protocol);
+    }
+    Ok(AuthResponse::Switch { plugin, auth_data })
+}
+
+pub fn parse_auth_public_key<'a>(
+    payload: &'a [u8],
+    secrets: &[(&str, &[u8])],
+) -> Result<&'a [u8], CodecError> {
+    match payload {
+        [0xff, ..] => Err(parse_server_error(payload, secrets, true)?),
+        [0x01, public_key @ ..] if !public_key.is_empty() => Ok(public_key),
         _ => Err(CodecError::Protocol),
     }
 }
@@ -1491,11 +1527,38 @@ mod tests {
         );
         assert_eq!(
             parse_auth_response(
-                b"\xfemysql_native_password\0hostile-switch",
+                b"\xfemysql_native_password\x000123456789abcdefghij\0",
                 &[],
-                AuthPlugin::MysqlNativePassword,
+                AuthPlugin::CachingSha2Password,
+            ),
+            Ok(AuthResponse::Switch {
+                plugin: AuthPlugin::MysqlNativePassword,
+                auth_data: b"0123456789abcdefghij".to_vec(),
+            })
+        );
+        assert_eq!(
+            parse_auth_response(
+                b"\xfeunknown_password\x000123456789abcdefghij\0",
+                &[],
+                AuthPlugin::CachingSha2Password,
             ),
             Err(CodecError::Unsupported)
+        );
+        assert_eq!(
+            parse_auth_response(
+                b"\xfemysql_native_password\0short\0",
+                &[],
+                AuthPlugin::CachingSha2Password,
+            ),
+            Err(CodecError::Protocol)
+        );
+        assert_eq!(
+            parse_auth_public_key(b"\x01-----BEGIN PUBLIC KEY-----", &[]),
+            Ok(&b"-----BEGIN PUBLIC KEY-----"[..])
+        );
+        assert_eq!(
+            parse_auth_public_key(b"\x01", &[]),
+            Err(CodecError::Protocol)
         );
         assert_eq!(
             parse_auth_response(&[0x01, 0x05], &[], AuthPlugin::CachingSha2Password),
