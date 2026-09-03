@@ -97,17 +97,17 @@ Its deterministic fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting,
 the existing MySQL 8.4 `caching_sha2_password` path, repeated calls on one
 session, typed boundary values, exact command metadata, and fail-closed limits.
 
-Version 0.2.1-rc.1 is an unpublished source candidate. It adds one bounded auth
+Version 0.2.1 is the accepted stable source candidate. It adds one bounded auth
 switch plus complete cold-cache `caching_sha2_password` authentication for
 stock MySQL 8, including typed 1045/28000 failures for wrong credentials. It
 requires Sigil 0.33.1 or newer and an entropy grant only when the unencrypted
-cold-cache exchange is possible. Do not add `mysql@0.2.1-rc.1` to a project
-lock until a separately authorized prerelease is published and verified.
+cold-cache exchange is possible. Do not add `mysql@0.2.1` to a project lock
+until the separately authorized stable release is published and verified.
 Its fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting, MySQL 8.0.29
 fast, TLS-full, RSA-full, and auth-switch paths, repeated calls on one session,
 typed boundary values, exact command metadata, and fail-closed limits.
 
-| Public 0.2.0 | Unpublished 0.2.1-rc.1 source candidate |
+| Public 0.2.0 | Accepted 0.2.1 stable source candidate |
 |---|---|
 | SingleStore native auth and warm-cache MySQL 8 auth | also handles `mysql_native_password` auth switches and cold `caching_sha2_password` caches |
 | unsupported on cold-cache and switched login failures | returns the server's typed authentication error, including 1045/28000 |

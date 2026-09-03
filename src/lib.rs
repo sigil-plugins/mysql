@@ -1929,7 +1929,7 @@ mod tests {
     fn candidate_names_exact_sql_v02_and_requires_a_compatible_sigil() {
         let manifest = include_str!("../plugin.toml");
 
-        assert!(manifest.contains("version = \"0.2.1-rc.1\""));
+        assert!(manifest.contains("version = \"0.2.1\""));
         assert!(manifest.contains("entrypoint = \"sigil:sql/driver@0.2.0\""));
         assert!(!manifest.contains("entrypoint = \"sigil:sql/driver@0.1.0\""));
         assert!(manifest.contains("sigil = \">=0.33.1, <1.0.0\""));

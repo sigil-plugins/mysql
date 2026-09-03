@@ -13,7 +13,7 @@ secrets = ["github:conformance/mysql"]
 entropy = ["github:conformance/mysql"]
 
 [plugins.require]
-mysql = { version = "=0.2.1-rc.1", source = "github:conformance/mysql" }
+mysql = { version = "=0.2.1", source = "github:conformance/mysql" }
 
 [plugins.grants.mysql]
 secrets = ["MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_BAD_PASSWORD"]
