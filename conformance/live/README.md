@@ -1,13 +1,13 @@
 # Pinned live acceptance
 
-This gate proves the accepted MySQL 0.2.1 stable source through Sigil's real
+This gate proves the public MySQL 0.2.1 release through Sigil's real
 plugin store, lock, component host, and Lua resource bridge. It uses a
 rootless Podman or Docker runner on Linux and never publishes an artifact.
 
 ## Exact inputs
 
-- Candidate commit:
-  `cc4dab15d66b760d507fb3214d0b75bb6618a9b6`
+- Release commit:
+  `f62d41387bd27c671f734a4ba6171d619f810614`
 - `plugin.wasm` SHA-256:
   `968704493a62e07d8011bbbe4ce2d8f178b30dc0b1bc1e379c2a2e41263d9125`
 - `plugin.wasm` BLAKE3:
@@ -21,7 +21,7 @@ rootless Podman or Docker runner on Linux and never publishes an artifact.
 - MySQL 8.0.29 Linux/amd64 manifest:
   `docker.io/library/mysql@sha256:44f98f4dd825a945d2a6a4b7b2f14127b5d07c5aaa07d9d232c2b58936fb76dc`
 
-The script rejects changed candidate digests before starting either service.
+The script rejects changed release digests before starting either service.
 It runs SingleStore with four CPUs because that image's free license rejects a
 larger visible CPU count.
 
@@ -48,10 +48,10 @@ for it in the exit trap. `KEEP_LIVE_SCRATCH=1` retains the temporary Sigil
 project for diagnosis; it does not retain service state.
 
 Sigil 0.33.0 already contains the SQL 0.2 host contract but predates this
-candidate's declared 0.33.1 floor. The harness lowers that floor only in a
+release's declared 0.33.1 floor. The harness lowers that floor only in a
 scratch manifest when testing 0.33.0. SemVer excludes prereleases from a stable
 lower-bound comparator, so the harness similarly pins a supplied prerelease
-binary's exact version in scratch. The candidate component and package are
+binary's exact version in scratch. The release component and package are
 hashed before either operation, and neither checked-in artifact is changed.
 
 ## Matrix
@@ -88,7 +88,7 @@ assertion, never partial row output.
 
 Each run writes ignored evidence under `target/live-acceptance/run.*`, including
 image pull identities, raw handshake probes, auth-plugin evidence, JSON
-reports, hostile-peer traces, service logs, candidate identities, elapsed
+reports, hostile-peer traces, service logs, release identities, elapsed
 times, the one-line `cleanup-count.txt`, container and volume inventories
 before and after teardown, and `teardown.txt`. A successful teardown file ends
 with:
