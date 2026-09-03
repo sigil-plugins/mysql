@@ -88,7 +88,7 @@ one GitHub OIDC/Sigstore package attestation, and publishes an immutable tag and
 release. It has no long-lived signing secret and never resumes or replaces a
 partial version.
 
-Version 0.2.0 is the current public stable release. It includes the additive
+Version 0.2.0 is the preceding public stable release. It includes the additive
 `sigil:host/net-policy@1.0.0` contract, SingleStore-compatible
 `mysql_native_password`, and the typed SQL 0.2 session contract. It requires
 Sigil 0.33.1 or newer and is available as an immutable keyless-provenance
@@ -97,17 +97,17 @@ Its deterministic fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting,
 the existing MySQL 8.4 `caching_sha2_password` path, repeated calls on one
 session, typed boundary values, exact command metadata, and fail-closed limits.
 
-Version 0.2.1 is the accepted stable source candidate. It adds one bounded auth
+Version 0.2.1 is the current public stable release. It adds one bounded auth
 switch plus complete cold-cache `caching_sha2_password` authentication for
 stock MySQL 8, including typed 1045/28000 failures for wrong credentials. It
 requires Sigil 0.33.1 or newer and an entropy grant only when the unencrypted
-cold-cache exchange is possible. Do not add `mysql@0.2.1` to a project lock
-until the separately authorized stable release is published and verified.
-Its fixtures cover the exact SingleStoreDB Dev 0.2.35 greeting, MySQL 8.0.29
+cold-cache exchange is possible. Add the exact immutable identity with
+`sigil plugin add mysql@0.2.1`. Its fixtures cover the exact SingleStoreDB Dev
+0.2.35 greeting, MySQL 8.0.29
 fast, TLS-full, RSA-full, and auth-switch paths, repeated calls on one session,
 typed boundary values, exact command metadata, and fail-closed limits.
 
-| Public 0.2.0 | Accepted 0.2.1 stable source candidate |
+| Public 0.2.0 | Public 0.2.1 |
 |---|---|
 | SingleStore native auth and warm-cache MySQL 8 auth | also handles `mysql_native_password` auth switches and cold `caching_sha2_password` caches |
 | unsupported on cold-cache and switched login failures | returns the server's typed authentication error, including 1045/28000 |
