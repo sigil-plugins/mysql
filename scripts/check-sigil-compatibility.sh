@@ -105,7 +105,7 @@ grep -F 'requested capabilities: network, secrets, entropy' "$SCRATCH/inspect.tx
 
 "$SIGIL" plugin pack "$SCRATCH/package/plugin.toml" \
   --output-dir "$SCRATCH/package/dist"
-archive="$SCRATCH/package/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst"
+archive="$SCRATCH/package/dist/mysql-0.2.1.sigil-plugin.tar.zst"
 test -f "$archive"
 "$SIGIL" plugin validate "$archive"
 
@@ -128,7 +128,7 @@ cargo generate-lockfile --quiet --manifest-path "$SCRATCH/seeder/Cargo.toml" --o
 CARGO_TARGET_DIR="$ROOT/target/sigil-compat-seed" \
   cargo run --quiet --locked --offline \
     --manifest-path "$SCRATCH/seeder/Cargo.toml" -- \
-    "$SCRATCH/data" "$archive" "$SOURCE" mysql 0.2.1-rc.1 mysql-conformance-0.2.1-rc.1
+    "$SCRATCH/data" "$archive" "$SOURCE" mysql 0.2.1 mysql-conformance-0.2.1
 
 mkdir -p "$SCRATCH/project/.sigil" "$SCRATCH/project/scenarios"
 cp "$ROOT/conformance/sigil.toml" "$SCRATCH/project/.sigil/sigil.toml"

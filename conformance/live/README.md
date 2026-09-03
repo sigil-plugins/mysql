@@ -1,6 +1,6 @@
 # Pinned live acceptance
 
-This gate proves the unpublished MySQL SQL 0.2 candidate through Sigil's real
+This gate proves the accepted MySQL 0.2.1 stable source through Sigil's real
 plugin store, lock, component host, and Lua resource bridge. It uses a
 rootless Podman or Docker runner on Linux and never publishes an artifact.
 
@@ -9,13 +9,13 @@ rootless Podman or Docker runner on Linux and never publishes an artifact.
 - Candidate commit:
   `cc4dab15d66b760d507fb3214d0b75bb6618a9b6`
 - `plugin.wasm` SHA-256:
-  `9ece6ea3e5fc2f176a0059d41b8d233528ee17482202c8c1e9727fb1e44e698c`
+  `968704493a62e07d8011bbbe4ce2d8f178b30dc0b1bc1e379c2a2e41263d9125`
 - `plugin.wasm` BLAKE3:
-  `5abf00e529047497e70d76cd210b7dd6774024e17303624320d89ac20f2c33fe`
-- `dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst` SHA-256:
-  `ccbee61486021a05d8e692c8010eef77dccc04c8cc4782e2b03b82734a9f8459`
-- `dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst` BLAKE3:
-  `dc06c86d498c256cab7ebadfac294a77d2b87aa3fa71d2ee4244f5dd4499d204`
+  `9f59fe036ccf1651ac932f52a3fe6b66ebf039f5c77ded844ab95647060e7e17`
+- `dist/mysql-0.2.1.sigil-plugin.tar.zst` SHA-256:
+  `c5d8daf3e824fe3f9329f7938f125504a35df0ff4bb368dadae562a12448e436`
+- `dist/mysql-0.2.1.sigil-plugin.tar.zst` BLAKE3:
+  `5ff1772bf8cbee0756fcfcc4d61169fbb258d9deafffe0579386631eeff880fb`
 - SingleStoreDB Dev 0.2.35 Linux/amd64 manifest:
   `ghcr.io/singlestore-labs/singlestoredb-dev@sha256:603b0ac0c7992becab334534a3ec1b37bac1a630b3e09cb50369fa222c72c269`
 - MySQL 8.0.29 Linux/amd64 manifest:

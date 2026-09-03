@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-plugin-mysql"
-version = "0.2.1-rc.1"
+version = "0.2.1"
 dependencies = [
  "proptest",
  "rand_chacha 0.3.1",

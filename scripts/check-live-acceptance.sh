@@ -42,10 +42,10 @@ readonly ENGINE
 SINGLESTORE_IMAGE="ghcr.io/singlestore-labs/singlestoredb-dev@sha256:603b0ac0c7992becab334534a3ec1b37bac1a630b3e09cb50369fa222c72c269"
 MYSQL_IMAGE="docker.io/library/mysql@sha256:44f98f4dd825a945d2a6a4b7b2f14127b5d07c5aaa07d9d232c2b58936fb76dc"
 CANDIDATE_COMMIT="35b882c91ac2999a165a671c5c92e4747ebd1322"
-EXPECTED_COMPONENT_SHA256="9ece6ea3e5fc2f176a0059d41b8d233528ee17482202c8c1e9727fb1e44e698c"
-EXPECTED_PACKAGE_SHA256="ccbee61486021a05d8e692c8010eef77dccc04c8cc4782e2b03b82734a9f8459"
-EXPECTED_COMPONENT_BLAKE3="5abf00e529047497e70d76cd210b7dd6774024e17303624320d89ac20f2c33fe"
-EXPECTED_PACKAGE_BLAKE3="dc06c86d498c256cab7ebadfac294a77d2b87aa3fa71d2ee4244f5dd4499d204"
+EXPECTED_COMPONENT_SHA256="968704493a62e07d8011bbbe4ce2d8f178b30dc0b1bc1e379c2a2e41263d9125"
+EXPECTED_PACKAGE_SHA256="c5d8daf3e824fe3f9329f7938f125504a35df0ff4bb368dadae562a12448e436"
+EXPECTED_COMPONENT_BLAKE3="9f59fe036ccf1651ac932f52a3fe6b66ebf039f5c77ded844ab95647060e7e17"
+EXPECTED_PACKAGE_BLAKE3="5ff1772bf8cbee0756fcfcc4d61169fbb258d9deafffe0579386631eeff880fb"
 readonly SINGLESTORE_IMAGE MYSQL_IMAGE CANDIDATE_COMMIT
 readonly EXPECTED_COMPONENT_SHA256 EXPECTED_PACKAGE_SHA256
 readonly EXPECTED_COMPONENT_BLAKE3 EXPECTED_PACKAGE_BLAKE3
@@ -354,19 +354,19 @@ start_fault_peer() {
 }
 
 if [[ "$(git -C "$ROOT" rev-parse "$CANDIDATE_COMMIT")" != "$CANDIDATE_COMMIT" ]]; then
-  echo "MySQL 0.2.1-rc.1 candidate commit is unavailable" >&2
+  echo "MySQL 0.2.1 accepted implementation commit is unavailable" >&2
   exit 1
 fi
 if ! git -C "$ROOT" merge-base --is-ancestor \
   "$CANDIDATE_COMMIT" HEAD; then
-  echo "live acceptance workspace does not descend from the MySQL 0.2.1-rc.1 candidate" >&2
+  echo "live acceptance workspace does not descend from the MySQL 0.2.1 accepted implementation" >&2
   exit 1
 fi
 echo "$EXPECTED_COMPONENT_SHA256  $ROOT/plugin.wasm" | sha256sum --check --strict
-echo "$EXPECTED_PACKAGE_SHA256  $ROOT/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst" |
+echo "$EXPECTED_PACKAGE_SHA256  $ROOT/dist/mysql-0.2.1.sigil-plugin.tar.zst" |
   sha256sum --check --strict
 echo "$EXPECTED_COMPONENT_BLAKE3  $ROOT/plugin.wasm" | b3sum --check
-echo "$EXPECTED_PACKAGE_BLAKE3  $ROOT/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst" |
+echo "$EXPECTED_PACKAGE_BLAKE3  $ROOT/dist/mysql-0.2.1.sigil-plugin.tar.zst" |
   b3sum --check
 
 "$ENGINE" pull "$SINGLESTORE_IMAGE" >"$EVIDENCE/singlestore.pull.txt"
@@ -483,8 +483,8 @@ CARGO_TARGET_DIR="$ROOT/target/sigil-compat-seed" \
   cargo run --quiet --locked --offline \
     --manifest-path "$SCRATCH/seeder/Cargo.toml" -- \
     "$SCRATCH/data" \
-    "$SCRATCH/package/dist/mysql-0.2.1-rc.1.sigil-plugin.tar.zst" \
-    github:conformance/mysql mysql 0.2.1-rc.1 mysql-live-0.2.1-rc.1
+    "$SCRATCH/package/dist/mysql-0.2.1.sigil-plugin.tar.zst" \
+    github:conformance/mysql mysql 0.2.1 mysql-live-0.2.1
 
 cp "$ROOT/conformance/live/sigil.toml" "$SCRATCH/project/.sigil/sigil.toml"
 for scenario in "$ROOT"/conformance/live/*.sigil.lua; do
