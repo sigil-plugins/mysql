@@ -160,7 +160,7 @@ port="$(<"$ready")"
 
 if ! MYSQL_USER=root MYSQL_PASSWORD=secret \
   run_sigil run scenarios/mysql-v02.lua \
-    --endpoint "database=http://127.0.0.1:$port" \
+    --plugin-route "database:3306=mysql://127.0.0.1:$port" \
     --env MYSQL_USER --env MYSQL_PASSWORD --json >"$SCRATCH/run.json"; then
   python3 -m json.tool "$SCRATCH/run.json" >&2 || true
   cat "$SCRATCH/mysql.log" >&2

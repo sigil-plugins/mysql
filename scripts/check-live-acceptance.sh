@@ -263,7 +263,7 @@ run_live_scenario() {
   MYSQL_DIALECT="$dialect" MYSQL_USER="$user" MYSQL_PASSWORD="$password" \
   MYSQL_BAD_PASSWORD="$BAD_PASSWORD" \
     run_sigil run scenarios/mysql-session.lua \
-      --endpoint "database=http://127.0.0.1:$port" \
+      --plugin-route "database:3306=mysql://127.0.0.1:$port" \
       --env MYSQL_DIALECT --env MYSQL_USER --env MYSQL_PASSWORD --env MYSQL_BAD_PASSWORD \
       --json >"$report"
   elapsed=$(($(date +%s) - started))
@@ -290,7 +290,7 @@ run_pass_scenario() {
   local report="$EVIDENCE/$label.report.json"
   MYSQL_USER="$user" MYSQL_PASSWORD="$password" MYSQL_BAD_PASSWORD="$BAD_PASSWORD" \
     run_sigil run "scenarios/$scenario" \
-      --endpoint "database=http://127.0.0.1:$port" \
+      --plugin-route "database:3306=mysql://127.0.0.1:$port" \
       --env MYSQL_USER --env MYSQL_PASSWORD --env MYSQL_BAD_PASSWORD \
       --json >"$report" \
       2>"$EVIDENCE/$label.stderr.txt"
@@ -553,7 +553,7 @@ set_network_option max_bytes 32MiB 1KiB
 set +e
 MYSQL_USER=sigil MYSQL_PASSWORD="$MYSQL_USER_PASSWORD" MYSQL_BAD_PASSWORD="$BAD_PASSWORD" \
   run_sigil run scenarios/mysql-host-limit.lua \
-    --endpoint "database=http://127.0.0.1:$mysql_port" \
+    --plugin-route "database:3306=mysql://127.0.0.1:$mysql_port" \
     --env MYSQL_USER --env MYSQL_PASSWORD --env MYSQL_BAD_PASSWORD --json \
     >"$EVIDENCE/host-limit.report.json" \
     2>"$EVIDENCE/host-limit.stderr.txt"
@@ -581,7 +581,7 @@ PY
 set +e
 MYSQL_USER=sigil MYSQL_PASSWORD="$MYSQL_USER_PASSWORD" MYSQL_BAD_PASSWORD="$BAD_PASSWORD" \
   run_sigil run scenarios/mysql-host-limit.lua \
-    --endpoint "database=http://127.0.0.1:$mysql_port" \
+    --plugin-route "database:3306=mysql://127.0.0.1:$mysql_port" \
     --env MYSQL_USER --env MYSQL_PASSWORD --env MYSQL_BAD_PASSWORD \
     >"$EVIDENCE/host-limit.human.txt" 2>&1
 host_limit_human_status=$?
